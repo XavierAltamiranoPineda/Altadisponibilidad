@@ -1,0 +1,239 @@
+---
+- name: Probar restauracion MongoDB desde backup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    restore_test_database: "{{ mongo_database }}_restore_test"
+    mongorestore_bin: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongorestore"
+
+  tasks:
+
+    # ============================================================
+    # LOCALIZAR BACKUP
+    # ============================================================
+
+    - name: Buscar respaldo mas reciente
+      ansible.builtin.shell: |
+        find "{{ backup_root }}/{{ mongo_database }}" \
+          -type f \
+          -name "{{ mongo_database }}_*{{ backup_extension }}" \
+          -printf '%T@ %p\n' \
+          | sort -nr \
+          | head -n1 \
+          | cut -d' ' -f2-
+      register: latest_backup
+      changed_when: false
+
+    - name: Validar existencia de respaldo
+      ansible.builtin.assert:
+        that:
+          - latest_backup.stdout | length > 0
+        fail_msg: "[ERROR] No existe un backup disponible para restaurar"
+        success_msg: "[OK] Backup localizado"
+
+    - name: Definir archivos de restauracion
+      ansible.builtin.set_fact:
+        backup_file_path: "{{ latest_backup.stdout }}"
+        checksum_file_path: "{{ latest_backup.stdout }}.sha256"
+
+    # ============================================================
+    # VALIDAR INTEGRIDAD ANTES DEL RESTORE
+    # ============================================================
+
+    - name: Validar checksum SHA-256 antes del restore
+      ansible.builtin.shell: |
+        cd "$(dirname "{{ backup_file_path }}")"
+        sha256sum -c "$(basename "{{ checksum_file_path }}")"
+      register: checksum_validation
+      changed_when: false
+
+    - name: Confirmar integridad previa
+      ansible.builtin.assert:
+        that:
+          - checksum_validation.rc == 0
+        fail_msg: "[ERROR] El backup no supera la validacion SHA-256"
+        success_msg: "[OK] Integridad SHA-256 validada antes del restore"
+
+    # ============================================================
+    # VALIDAR MONGORESTORE
+    # ============================================================
+
+    - name: Obtener version de mongorestore
+      ansible.builtin.command:
+        cmd: "{{ mongorestore_bin }} --version"
+      register: mongorestore_version
+      changed_when: false
+
+    - name: Validar version aprobada de mongorestore
+      ansible.builtin.assert:
+        that:
+          - "'mongorestore version: ' ~ mongodb_tools_version in mongorestore_version.stdout"
+        fail_msg: "[ERROR] Version incorrecta de mongorestore"
+        success_msg: "[OK] mongorestore {{ mongodb_tools_version }} validado"
+
+    # ============================================================
+    # LIMPIAR BASE TEMPORAL PREVIA
+    # ============================================================
+
+    - name: Eliminar base temporal anterior si existe
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          $(docker ps \
+            --filter "label=com.docker.swarm.service.name=mongo1" \
+            --format '{{"{{"}}.ID{{"}}"}}' | head -n1) \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "db.getSiblingDB(\"{{ restore_test_database }}\").dropDatabase()"
+          '
+      changed_when: true
+      no_log: true
+
+    # ============================================================
+    # RESTAURACION
+    # ============================================================
+
+    - name: Restaurar backup en base temporal
+      ansible.builtin.command:
+        argv:
+          - "{{ mongorestore_bin }}"
+          - --host
+          - "{{ mongo_backup_host }}"
+          - --port
+          - "{{ mongo_backup_port | string }}"
+          - --username
+          - "{{ mongo_restore_user }}"
+          - --password
+          - "{{ mongo_restore_password }}"
+          - --authenticationDatabase
+          - admin
+          - --gzip
+          - "--archive={{ backup_file_path }}"
+          - --nsFrom
+          - "{{ mongo_database }}.*"
+          - --nsTo
+          - "{{ restore_test_database }}.*"
+      register: restore_result
+      changed_when: true
+      no_log: true
+
+    # ============================================================
+    # VALIDAR RESTAURACION
+    # ============================================================
+
+    - name: Buscar un nodo MongoDB activo
+      ansible.builtin.shell: |
+        for service in mongo1 mongo2 mongo3; do
+          container=$(docker ps \
+            --filter "label=com.docker.swarm.service.name=${service}" \
+            --format '{{"{{"}}.ID{{"}}"}}' | head -n1)
+
+          if [ -n "$container" ]; then
+            echo "$container"
+            exit 0
+          fi
+        done
+        exit 1
+      register: mongo_available_container
+      changed_when: false
+
+    - name: Obtener cantidad de documentos en base original
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          {{ mongo_available_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "
+                const targetDB = db.getSiblingDB(\"{{ mongo_database }}\");
+                let total = 0;
+                targetDB.getCollectionNames().forEach(c => {
+                  total += targetDB.getCollection(c).countDocuments({});
+                });
+                print(total);
+              "
+          '
+      register: original_documents
+      changed_when: false
+      no_log: true
+
+    - name: Obtener cantidad de documentos en base restaurada
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          {{ mongo_available_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "
+                const targetDB = db.getSiblingDB(\"{{ restore_test_database }}\");
+                let total = 0;
+                targetDB.getCollectionNames().forEach(c => {
+                  total += targetDB.getCollection(c).countDocuments({});
+                });
+                print(total);
+              "
+          '
+      register: restored_documents
+      changed_when: false
+      no_log: true
+
+    - name: Comparar cantidad de documentos
+      ansible.builtin.assert:
+        that:
+          - original_documents.stdout | int == restored_documents.stdout | int
+        fail_msg: >-
+          [ERROR] La cantidad de documentos no coincide.
+          Original={{ original_documents.stdout }}
+          Restaurada={{ restored_documents.stdout }}
+        success_msg: >-
+          [OK] Cantidad de documentos coincidente:
+          {{ original_documents.stdout }}
+
+    # ============================================================
+    # RESULTADO
+    # ============================================================
+
+    - name: Mostrar resultado final
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "PRUEBA DE RESTAURACION COMPLETADA"
+          - "============================================================"
+          - "Ambiente: {{ environment_name }}"
+          - "Backup: {{ backup_file_path }}"
+          - "Base origen: {{ mongo_database }}"
+          - "Base restaurada: {{ restore_test_database }}"
+          - "Documentos origen: {{ original_documents.stdout }}"
+          - "Documentos restaurados: {{ restored_documents.stdout }}"
+          - "SHA-256 previo: OK"
+          - "mongorestore: {{ mongodb_tools_version }}"
+          - "Estado: RESTORE VALIDADO"
+          - "============================================================"

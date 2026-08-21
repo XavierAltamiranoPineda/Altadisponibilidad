@@ -64,31 +64,16 @@ ansible-playbook playbooks/tests/test_replication_data.yml --ask-vault-pass
 
 ansible-playbook playbooks/tests/test_high_availability.yml --ask-vault-pass
 
-# ============================================================
-# 8.CIFRADO DE CONTRASEÑAS BACKUPS Y RESTORE
-# ============================================================
-
-ansible-vault encrypt vars/vault_mongodb.yml
-
-ansible-vault view vars/vault_mongodb.yml
-
-## ansible-vault edit vars/vault_mongodb.yml (Para editar)
-
-ansible-playbook playbooks/backup/backup_create_users.yml --ask-vault-pass
-
-ansible-playbook playbooks/backup/backup_run.yml --ask-vault-pass
-
-
 
 # ============================================================
-# 9. BORRAR SOLO LA BASE prueba_ha
+# 8. BORRAR SOLO LA BASE prueba_ha
 # ============================================================
 
 ansible-playbook playbooks/tests/cleanup_test_data.yml --ask-vault-pass
 
 
 # ============================================================
-# 10. ELIMINAR EL ENTORNO DOCKER V2
+# 9. ELIMINAR EL ENTORNO DOCKER V2
 # ============================================================
 
 ansible-playbook playbooks/tests/reset_local_environment.yml

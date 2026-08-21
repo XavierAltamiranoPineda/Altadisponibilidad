@@ -1,0 +1,436 @@
+---
+- name: Prueba final de recuperacion MongoDB ante perdida de base
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    mongorestore_bin: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongorestore"
+
+  tasks:
+
+    # ============================================================
+    # LOCALIZAR BACKUP
+    # ============================================================
+
+    - name: Buscar respaldo mas reciente
+      ansible.builtin.shell: |
+        find "{{ backup_root }}/{{ mongo_database }}" \
+          -type f \
+          -name "{{ mongo_database }}_*{{ backup_extension }}" \
+          -printf '%T@ %p\n' \
+          | sort -nr \
+          | head -n1 \
+          | cut -d' ' -f2-
+      register: latest_backup
+      changed_when: false
+
+    - name: Validar existencia del respaldo
+      ansible.builtin.assert:
+        that:
+          - latest_backup.stdout | length > 0
+        fail_msg: "[ERROR] No existe un respaldo disponible"
+        success_msg: "[OK] Backup localizado"
+
+    - name: Definir archivos del respaldo
+      ansible.builtin.set_fact:
+        backup_file_path: "{{ latest_backup.stdout }}"
+        checksum_file_path: "{{ latest_backup.stdout }}.sha256"
+
+    # ============================================================
+    # VALIDAR BACKUP ANTES DEL DESASTRE
+    # ============================================================
+
+    - name: Validar checksum SHA-256 antes de eliminar la base
+      ansible.builtin.shell: |
+        cd "$(dirname "{{ backup_file_path }}")"
+        sha256sum -c "$(basename "{{ checksum_file_path }}")"
+      register: checksum_validation
+      changed_when: false
+
+    - name: Confirmar integridad del respaldo
+      ansible.builtin.assert:
+        that:
+          - checksum_validation.rc == 0
+        fail_msg: "[ERROR] El backup no supera SHA-256. Se cancela la prueba."
+        success_msg: "[OK] Backup integro antes de la prueba de desastre"
+
+    # ============================================================
+    # VALIDAR MONGORESTORE
+    # ============================================================
+
+    - name: Validar version de mongorestore
+      ansible.builtin.command:
+        cmd: "{{ mongorestore_bin }} --version"
+      register: mongorestore_version
+      changed_when: false
+
+    - name: Confirmar version aprobada
+      ansible.builtin.assert:
+        that:
+          - "'mongorestore version: ' ~ mongodb_tools_version in mongorestore_version.stdout"
+        fail_msg: "[ERROR] Version incorrecta de mongorestore"
+        success_msg: "[OK] mongorestore {{ mongodb_tools_version }} validado"
+
+    # ============================================================
+    # LOCALIZAR PRIMARY
+    # ============================================================
+
+    - name: Buscar nodo MongoDB activo
+      ansible.builtin.shell: |
+        for service in mongo1 mongo2 mongo3; do
+          container=$(docker ps \
+            --filter "label=com.docker.swarm.service.name=${service}" \
+            --format '{{"{{"}}.ID{{"}}"}}' | head -n1)
+
+          if [ -n "$container" ]; then
+            echo "$container"
+            exit 0
+          fi
+        done
+        exit 1
+      register: mongo_available_container
+      changed_when: false
+
+    - name: Detectar PRIMARY actual
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          {{ mongo_available_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "db.hello().primary"
+          '
+      register: mongo_primary
+      changed_when: false
+      no_log: true
+
+    - name: Validar PRIMARY
+      ansible.builtin.assert:
+        that:
+          - mongo_primary.stdout | length > 0
+          - "':' in mongo_primary.stdout"
+        fail_msg: "[ERROR] No existe PRIMARY disponible"
+        success_msg: "[OK] PRIMARY disponible"
+
+    - name: Obtener servicio PRIMARY
+      ansible.builtin.set_fact:
+        mongo_primary_service: "{{ mongo_primary.stdout.split(':')[0] }}"
+
+    - name: Obtener contenedor PRIMARY
+      ansible.builtin.shell: |
+        docker ps \
+          --filter "label=com.docker.swarm.service.name={{ mongo_primary_service }}" \
+          --format '{{"{{"}}.ID{{"}}"}}' | head -n1
+      register: mongo_primary_container
+      changed_when: false
+
+    - name: Validar contenedor PRIMARY
+      ansible.builtin.assert:
+        that:
+          - mongo_primary_container.stdout | length > 0
+        fail_msg: "[ERROR] No se encontro el contenedor PRIMARY"
+        success_msg: "[OK] Contenedor PRIMARY localizado"
+
+    # ============================================================
+    # INVENTARIO ANTES DEL DESASTRE
+    # ============================================================
+
+    - name: Obtener colecciones y documentos originales
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          {{ mongo_primary_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "
+                const targetDB = db.getSiblingDB(\"{{ mongo_database }}\");
+                const collections = targetDB.getCollectionNames().sort();
+
+                let total = 0;
+
+                collections.forEach(c => {
+                  total += targetDB.getCollection(c).countDocuments({});
+                });
+
+                print(
+                  JSON.stringify({
+                    collections: collections,
+                    collectionCount: collections.length,
+                    documentCount: total
+                  })
+                );
+              "
+          '
+      register: original_state_raw
+      changed_when: false
+      no_log: true
+
+    - name: Convertir inventario original
+      ansible.builtin.set_fact:
+        original_state: "{{ original_state_raw.stdout | from_json }}"
+
+    - name: Validar que la base contiene datos
+      ansible.builtin.assert:
+        that:
+          - original_state.collectionCount | int > 0
+          - original_state.documentCount | int > 0
+        fail_msg: "[ERROR] La base origen no contiene datos suficientes para realizar la prueba"
+        success_msg: >-
+          [OK] Estado original capturado:
+          colecciones={{ original_state.collectionCount }},
+          documentos={{ original_state.documentCount }}
+
+    # ============================================================
+    # SIMULAR PERDIDA DE LA BASE
+    # ============================================================
+
+    - name: Eliminar completamente la base de datos
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          {{ mongo_primary_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "
+                const result =
+                  db.getSiblingDB(\"{{ mongo_database }}\").dropDatabase();
+
+                if (!result.ok) {
+                  quit(1);
+                }
+
+                print(\"DATABASE_DROPPED\");
+              "
+          '
+      register: database_drop
+      changed_when: true
+      no_log: true
+
+    # ============================================================
+    # CONFIRMAR PERDIDA
+    # ============================================================
+
+    - name: Verificar que la base fue eliminada
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          {{ mongo_primary_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "
+                const exists =
+                  db.getMongo()
+                    .getDBNames()
+                    .includes(\"{{ mongo_database }}\");
+
+                print(exists ? \"EXISTS\" : \"REMOVED\");
+              "
+          '
+      register: database_removed
+      changed_when: false
+      no_log: true
+
+    - name: Confirmar simulacion de perdida
+      ansible.builtin.assert:
+        that:
+          - "'REMOVED' in database_removed.stdout"
+        fail_msg: "[ERROR] No se pudo confirmar la eliminacion de {{ mongo_database }}"
+        success_msg: "[OK] PERDIDA SIMULADA: {{ mongo_database }} fue eliminada"
+
+    - name: Pausa para verificar eliminacion en MongoDB Compass
+      ansible.builtin.pause:
+        seconds: 5
+        prompt: >-
+          [INFO] La base {{ mongo_database }} fue eliminada.
+          Refresca MongoDB Compass para visualizar la perdida simulada.
+          La restauracion continuara automaticamente en 5 segundos.
+
+    # ============================================================
+    # RESTAURACION REAL
+    # ============================================================
+
+    - name: Restaurar base original desde el backup
+      ansible.builtin.command:
+        argv:
+          - "{{ mongorestore_bin }}"
+          - --host
+          - "{{ mongo_backup_host }}"
+          - --port
+          - "{{ mongo_backup_port | string }}"
+          - --username
+          - "{{ mongo_restore_user }}"
+          - --password
+          - "{{ mongo_restore_password }}"
+          - --authenticationDatabase
+          - admin
+          - --gzip
+          - "--archive={{ backup_file_path }}"
+          - --nsInclude
+          - "{{ mongo_database }}.*"
+      register: restore_result
+      changed_when: true
+      no_log: true
+
+    # ============================================================
+    # VALIDACION POST-RESTORE
+    # ============================================================
+
+    - name: Obtener estado despues de restaurar
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          {{ mongo_primary_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "
+                const targetDB = db.getSiblingDB(\"{{ mongo_database }}\");
+                const collections = targetDB.getCollectionNames().sort();
+
+                let total = 0;
+
+                collections.forEach(c => {
+                  total += targetDB.getCollection(c).countDocuments({});
+                });
+
+                print(
+                  JSON.stringify({
+                    collections: collections,
+                    collectionCount: collections.length,
+                    documentCount: total
+                  })
+                );
+              "
+          '
+      register: restored_state_raw
+      changed_when: false
+      no_log: true
+
+    - name: Convertir estado restaurado
+      ansible.builtin.set_fact:
+        restored_state: "{{ restored_state_raw.stdout | from_json }}"
+
+    - name: Comparar colecciones recuperadas
+      ansible.builtin.assert:
+        that:
+          - original_state.collections == restored_state.collections
+          - original_state.collectionCount | int == restored_state.collectionCount | int
+        fail_msg: >-
+          [ERROR] Las colecciones restauradas no coinciden con el estado original
+        success_msg: "[OK] Colecciones restauradas correctamente"
+
+    - name: Comparar cantidad de documentos recuperados
+      ansible.builtin.assert:
+        that:
+          - original_state.documentCount | int == restored_state.documentCount | int
+        fail_msg: >-
+          [ERROR] Documentos no coinciden.
+          Antes={{ original_state.documentCount }}
+          Restaurados={{ restored_state.documentCount }}
+        success_msg: >-
+          [OK] Documentos recuperados correctamente:
+          {{ restored_state.documentCount }}
+
+    # ============================================================
+    # VALIDAR REPLICA SET
+    # ============================================================
+
+    - name: Verificar estado del Replica Set
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          {{ mongo_primary_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "
+                const status = rs.status();
+
+                print(
+                  JSON.stringify(
+                    status.members.map(m => ({
+                      name: m.name,
+                      stateStr: m.stateStr,
+                      health: m.health
+                    }))
+                  )
+                );
+              "
+          '
+      register: replica_status
+      changed_when: false
+      no_log: true
+
+    - name: Mostrar estado del Replica Set
+      ansible.builtin.debug:
+        msg: "{{ replica_status.stdout }}"
+
+    # ============================================================
+    # RESULTADO FINAL
+    # ============================================================
+
+    - name: Mostrar resultado final
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "PRUEBA FINAL DE RECUPERACION COMPLETADA"
+          - "============================================================"
+          - "Ambiente: {{ environment_name }}"
+          - "Base recuperada: {{ mongo_database }}"
+          - "Backup utilizado: {{ backup_file_path }}"
+          - "PRIMARY: {{ mongo_primary.stdout }}"
+          - "Colecciones originales: {{ original_state.collectionCount }}"
+          - "Colecciones restauradas: {{ restored_state.collectionCount }}"
+          - "Documentos originales: {{ original_state.documentCount }}"
+          - "Documentos restaurados: {{ restored_state.documentCount }}"
+          - "SHA-256 previo: OK"
+          - "mongorestore: {{ mongodb_tools_version }}"
+          - "Replica Set: VALIDADO"
+          - "Estado: RECUPERACION ANTE DESASTRE VALIDADA"
+          - "============================================================"
