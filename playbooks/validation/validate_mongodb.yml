@@ -1,0 +1,242 @@
+---
+- name: Validar infraestructura MongoDB V2
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    mongo_network: "mongo_swarm_net"
+    mongo_secret: "mongo_keyfile"
+    mongo_replicaset: "rs0"
+
+  tasks:
+
+    # ============================================================
+    # 1. VALIDAR DOCKER SWARM
+    # ============================================================
+
+    - name: Verificar Docker Swarm
+      ansible.builtin.command:
+        cmd: docker info --format "{{ '{{.Swarm.LocalNodeState}}' }}"
+      register: swarm_state
+      changed_when: false
+
+    - name: Validar Docker Swarm activo
+      ansible.builtin.assert:
+        that:
+          - swarm_state.stdout | trim == "active"
+        fail_msg: "ERROR: Docker Swarm no esta activo."
+        success_msg: "OK: Docker Swarm activo."
+
+    # ============================================================
+    # 2. VALIDAR RED
+    # ============================================================
+
+    - name: Verificar red MongoDB
+      ansible.builtin.command:
+        cmd: docker network inspect {{ mongo_network }}
+      register: network_check
+      changed_when: false
+      failed_when: false
+
+    - name: Validar red MongoDB
+      ansible.builtin.assert:
+        that:
+          - network_check.rc == 0
+        fail_msg: "ERROR: La red {{ mongo_network }} no existe."
+        success_msg: "OK: Red {{ mongo_network }} disponible."
+
+    # ============================================================
+    # 3. VALIDAR SECRET
+    # ============================================================
+
+    - name: Verificar Docker Secret
+      ansible.builtin.command:
+        cmd: docker secret inspect {{ mongo_secret }}
+      register: secret_check
+      changed_when: false
+      failed_when: false
+
+    - name: Validar Docker Secret
+      ansible.builtin.assert:
+        that:
+          - secret_check.rc == 0
+        fail_msg: "ERROR: El secret {{ mongo_secret }} no existe."
+        success_msg: "OK: Docker Secret {{ mongo_secret }} disponible."
+
+    # ============================================================
+    # 4. VALIDAR SERVICIOS
+    # ============================================================
+
+    - name: Consultar replicas de servicios MongoDB
+      ansible.builtin.command:
+        cmd: >
+          docker service ls
+          --filter name={{ item }}
+          --format "{{ '{{.Replicas}}' }}"
+      loop:
+        - mongo1
+        - mongo2
+        - mongo3
+      register: service_replicas
+      changed_when: false
+
+    - name: Validar servicios 1/1
+      ansible.builtin.assert:
+        that:
+          - item.stdout | trim == "1/1"
+        fail_msg: "ERROR: {{ item.item }} no tiene 1/1 replicas."
+        success_msg: "OK: {{ item.item }} funcionando 1/1."
+      loop: "{{ service_replicas.results }}"
+
+    # ============================================================
+    # 5. OBTENER UN NODO DISPONIBLE
+    # ============================================================
+
+    - name: Obtener contenedor mongo1
+      ansible.builtin.shell:
+        cmd: >
+          docker ps -q
+          --filter "label=com.docker.swarm.service.name=mongo1"
+          | head -n 1
+      register: mongo1_container
+      changed_when: false
+
+    - name: Validar contenedor mongo1
+      ansible.builtin.assert:
+        that:
+          - mongo1_container.stdout | trim != ""
+        fail_msg: "ERROR: No se encontro mongo1."
+        success_msg: "OK: mongo1 encontrado."
+
+    # ============================================================
+    # 6. VALIDAR AUTENTICACION
+    # ============================================================
+
+    - name: Validar autenticacion MongoDB
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.adminCommand({connectionStatus:1}).ok"
+      register: auth_test
+      changed_when: false
+      no_log: true
+
+    - name: Confirmar autenticacion
+      ansible.builtin.assert:
+        that:
+          - auth_test.stdout | trim == "1"
+        fail_msg: "ERROR: La autenticacion MongoDB fallo."
+        success_msg: "OK: Autenticacion MongoDB funcionando."
+
+    # ============================================================
+    # 7. VALIDAR REPLICA SET
+    # ============================================================
+
+    - name: Consultar Replica Set
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "rs.status().set"
+      register: replset_name
+      changed_when: false
+      no_log: true
+
+    - name: Validar Replica Set
+      ansible.builtin.assert:
+        that:
+          - replset_name.stdout | trim == mongo_replicaset
+        fail_msg: "ERROR: Replica Set incorrecto."
+        success_msg: "OK: Replica Set {{ mongo_replicaset }}."
+
+    # ============================================================
+    # 8. DETECTAR PRIMARY ACTUAL
+    # ============================================================
+
+    - name: Detectar PRIMARY actual
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.hello().primary"
+      register: current_primary
+      changed_when: false
+      no_log: true
+
+    - name: Validar PRIMARY
+      ansible.builtin.assert:
+        that:
+          - current_primary.stdout | trim in
+            ["mongo1:27017", "mongo2:27017", "mongo3:27017"]
+        fail_msg: "ERROR: No se pudo detectar un PRIMARY valido."
+        success_msg: "OK: PRIMARY detectado."
+
+    # ============================================================
+    # 9. VALIDAR RED DE LOS SERVICIOS
+    # ============================================================
+
+    - name: Obtener ID de red MongoDB
+      ansible.builtin.command:
+        cmd: >
+          docker network inspect {{ mongo_network }}
+          --format "{{ '{{.ID}}' }}"
+      register: mongo_network_id
+      changed_when: false
+
+    - name: Validar red en servicios MongoDB
+      ansible.builtin.command:
+        cmd: >
+          docker service inspect {{ item }}
+          --format "{{ '{{json .Spec.TaskTemplate.Networks}}' }}"
+      loop:
+        - mongo1
+        - mongo2
+        - mongo3
+      register: service_networks
+      changed_when: false
+
+    - name: Confirmar red MongoDB en servicios
+      ansible.builtin.assert:
+        that:
+          - mongo_network_id.stdout | trim in item.stdout
+        fail_msg: "ERROR: {{ item.item }} no esta conectado a {{ mongo_network }}."
+        success_msg: "OK: {{ item.item }} conectado a {{ mongo_network }}."
+      loop: "{{ service_networks.results }}"
+
+    # ============================================================
+    # 10. RESULTADO
+    # ============================================================
+
+    - name: Mostrar resultado final
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "VALIDACION GENERAL MONGODB V2"
+          - "============================================================"
+          - "[OK] Docker Swarm: ACTIVE"
+          - "[OK] Red: {{ mongo_network }}"
+          - "[OK] Docker Secret: {{ mongo_secret }}"
+          - "[OK] mongo1: 1/1"
+          - "[OK] mongo2: 1/1"
+          - "[OK] mongo3: 1/1"
+          - "[OK] Autenticacion funcionando"
+          - "[OK] Replica Set: {{ mongo_replicaset }}"
+          - "[OK] PRIMARY actual: {{ current_primary.stdout | trim }}"
+          - "[OK] Servicios conectados a {{ mongo_network }}"
+          - "============================================================"
+          - "VALIDACION GENERAL EXITOSA"
+          - "============================================================"

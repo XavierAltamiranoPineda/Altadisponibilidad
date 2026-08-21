@@ -1,0 +1,152 @@
+---
+- name: Crear usuario administrador de MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  tasks:
+
+    # ============================================================
+    # 1. OBTENER CONTENEDOR MONGO1
+    # ============================================================
+
+    - name: Obtener contenedor de mongo1
+      ansible.builtin.shell:
+        cmd: docker ps -q --filter name=mongo1
+      register: mongo1_container
+      changed_when: false
+
+    - name: Validar contenedor MongoDB
+      ansible.builtin.assert:
+        that:
+          - mongo1_container.stdout | trim != ""
+        fail_msg: "ERROR: No se encontro el contenedor mongo1."
+        success_msg: "OK: Contenedor mongo1 encontrado."
+
+    # ============================================================
+    # 2. COMPROBAR SI LAS CREDENCIALES YA FUNCIONAN
+    # ============================================================
+
+    - name: Probar autenticacion existente
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.adminCommand({connectionStatus:1}).ok"
+      register: existing_auth
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Mostrar estado inicial del administrador
+      ansible.builtin.debug:
+        msg: >-
+          {{
+            'OK: El usuario administrador ya existe y autentica correctamente.'
+            if existing_auth.rc == 0 and existing_auth.stdout | trim == '1'
+            else
+            'INFO: El usuario administrador todavia no autentica. Se intentara crearlo.'
+          }}
+
+    # ============================================================
+    # 3. CREAR PRIMER USUARIO ADMINISTRADOR
+    # ============================================================
+
+    - name: Crear usuario administrador MongoDB
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --eval
+          "db.getSiblingDB('admin').createUser({
+            user: '{{ mongo_admin_user }}',
+            pwd: '{{ mongo_admin_password }}',
+            roles: [
+              { role: 'root', db: 'admin' }
+            ]
+          })"
+      register: admin_create
+      changed_when: true
+      failed_when: false
+      no_log: true
+      when:
+        - existing_auth.rc != 0 or existing_auth.stdout | trim != "1"
+
+    # ============================================================
+    # 4. VALIDAR AUTENTICACION FINAL
+    # ============================================================
+
+    - name: Probar autenticacion final del administrador
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.adminCommand({connectionStatus:1}).ok"
+      register: admin_auth
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+    - name: Validar autenticacion final
+      ansible.builtin.assert:
+        that:
+          - admin_auth.rc == 0
+          - admin_auth.stdout | trim == "1"
+        fail_msg: >-
+          ERROR: No fue posible crear o autenticar al usuario administrador.
+          Verifique que la instalacion sea limpia y que no exista un usuario
+          anterior con credenciales diferentes.
+        success_msg: "OK: Usuario administrador autenticado correctamente."
+
+    # ============================================================
+    # 5. CONSULTAR ROL DEL ADMINISTRADOR
+    # ============================================================
+
+    - name: Validar rol root
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.getSiblingDB('admin').getUser('{{ mongo_admin_user }}').roles.some(r => r.role === 'root' && r.db === 'admin')"
+      register: admin_root_role
+      changed_when: false
+      no_log: true
+
+    - name: Confirmar rol root
+      ansible.builtin.assert:
+        that:
+          - admin_root_role.stdout | trim == "true"
+        fail_msg: "ERROR: El usuario administrador no tiene el rol root."
+        success_msg: "OK: Usuario administrador tiene rol root."
+
+    # ============================================================
+    # 6. RESULTADO
+    # ============================================================
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "        USUARIO ADMINISTRADOR MONGODB V2"
+          - "============================================================"
+          - ""
+          - "[OK] MongoDB disponible"
+          - "[OK] Usuario: {{ mongo_admin_user }}"
+          - "[OK] Base de autenticacion: admin"
+          - "[OK] Rol: root"
+          - "[OK] Autenticacion verificada"
+          - ""
+          - "============================================================"

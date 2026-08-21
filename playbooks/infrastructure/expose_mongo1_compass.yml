@@ -1,0 +1,45 @@
+---
+- name: Exponer mongo1 para MongoDB Compass
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+
+    - name: Eliminar publicacion ingress actual
+      ansible.builtin.command:
+        cmd: >
+          docker service update
+          --publish-rm 27017
+          mongo1
+      register: remove_port
+      changed_when: true
+
+    - name: Publicar mongo1 en modo host
+      ansible.builtin.command:
+        cmd: >
+          docker service update
+          --publish-add published=27017,target=27017,protocol=tcp,mode=host
+          mongo1
+      register: add_port
+      changed_when: true
+
+    - name: Esperar servicio mongo1
+      ansible.builtin.command:
+        cmd: docker service ls --filter name=mongo1 --format "{{ '{{.Replicas}}' }}"
+      register: mongo1_state
+      retries: 30
+      delay: 2
+      until: mongo1_state.stdout | trim == "1/1"
+      changed_when: false
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "MONGO1 EXPUESTO PARA COMPASS"
+          - "============================================================"
+          - "[OK] Servicio mongo1: {{ mongo1_state.stdout | trim }}"
+          - "[OK] Puerto: 27017"
+          - "[OK] Publish mode: host"
+          - "============================================================"

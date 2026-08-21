@@ -1,612 +1,307 @@
-# Alta Disponibilidad de MongoDB con Replica Set y Docker Compose
+# Mongo Ansible V2 — MongoDB Replica Set en Docker Swarm
 
-Este proyecto documenta la implementación, configuración y validación de una arquitectura de **Alta Disponibilidad (HA)** basada en un **Replica Set de MongoDB 7 (rs0)** utilizando **Docker Compose**. El objetivo de esta práctica es garantizar la tolerancia a fallos, la replicación de datos en tiempo real, la elección automática de un nuevo nodo primario (*failover*) ante la caída de un servidor y la posterior resincronización transparente de los datos.
-
----
-
-## 1. Arquitectura del Replica Set
-
-La topología implementada consta de tres contenedores basados en la imagen oficial `mongo:7-jammy`, interconectados en una red puente (*bridge*) dedicada:
-
-* **`mongo1` (PRIMARY)**: Nodo principal de lectura y escritura (`priority: 2`). Almacena los datos y replica las operaciones a través del *oplog*.
-* **`mongo2` (SECONDARY)**: Nodo secundario de replicación. Mantiene una copia idéntica de los datos y está preparado para asumir el rol de primario si `mongo1` falla.
-* **`mongo3` (ARBITER)**: Nodo árbitro (`priority: 0`, `votes: 1`). No almacena datos ni replica información; su único propósito es participar en el quórum electoral para desempatar y garantizar la mayoría de votos requerida.
-
-```
-                         ┌─────────────────────┐
-                         │       mongo1        │
-                         │       PRIMARY       │
-                         │     27017:27017     │
-                         └──────────┬──────────┘
-                                    │
-                              Replicación
-                                    │
-                         ┌──────────▼──────────┐
-                         │       mongo2        │
-                         │      SECONDARY      │
-                         │     27018:27017     │
-                         └─────────────────────┘
-
-                         ┌─────────────────────┐
-                         │       mongo3        │
-                         │       ARBITER       │
-                         │     27019:27017     │
-                         └─────────────────────┘
-```
-
-### Rol del Árbitro en MongoDB
-* **Participación en elecciones**: Aporta un voto en el proceso de elección cuando el nodo primario no está disponible.
-* **Ahorro de recursos**: No almacena colecciones ni requiere almacenamiento persistente significativo.
-* **Mantenimiento del quórum**: En un clúster con 2 nodos de datos (número par), la pérdida de 1 nodo dejaría solo 1 voto de 2 (50%, sin mayoría estricta > 50%). Con el árbitro, se cuenta con un total de 3 votos; si cae un nodo de datos, quedan 2 votos de 3 (66.6%), permitiendo elegir un nuevo primario.
+Proyecto de automatización con **Ansible** para el despliegue, configuración, seguridad, validación y pruebas de alta disponibilidad (HA) de un cluster **MongoDB Replica Set (rs0)** de 3 nodos sobre **Docker Swarm**.
 
 ---
 
-## 2. Requisitos Previos
+## 🏗️ Arquitectura del Cluster
 
-Antes de desplegar el entorno, verifique el cumplimiento de los siguientes requisitos en el sistema anfitrión:
+- **Motor MongoDB:** `mongo:7-jammy`
+- **Replica Set:** `rs0`
+- **Nodos del Cluster:**
+  - `mongo1:27017` (Servicio inicial / PRIMARY prioritario)
+  - `mongo2:27017` (Nodo secundario)
+  - `mongo3:27017` (Nodo secundario)
+- **Red Swarm Overlay:** `mongo_swarm_net` (Attachable)
+- **Mecanismo de Autenticación Interna:** KeyFile compartido (`mongo_keyfile`) mediante Docker Secret (`/run/secrets/mongo_keyfile`)
+- **Autenticación Administrativa:** Usuario `admin` en base de datos `admin` con credenciales encriptadas vía Ansible Vault (`vars/vault_mongodb.yml`)
 
-* **Docker Engine** (versión 24.x o superior).
-* **Docker Compose** (v2 integrado).
-* **Terminal / Consola** (PowerShell en Windows o Bash en Linux/macOS).
-* **Puertos disponibles en el host**: `27017`, `27018` y `27019`.
+---
 
-### Verificación del Entorno
+## 📋 Prerrequisitos del Sistema
 
-Compruebe la instalación de Docker y Docker Compose ejecutando:
+Antes de clonar el proyecto y ejecutar los playbooks, es necesario contar con el siguiente entorno preparado:
+
+### 1. Sistema Operativo y WSL2
+- **Windows 10 / 11** con **WSL2** y la distribución **Ubuntu** instalada y funcionando.
+
+### 2. Docker Desktop y Configuración de Integración WSL
+- **Docker Desktop** instalado y abierto en Windows.
+- Activar la integración con WSL2 en Docker Desktop:
+  1. Abrir Docker Desktop y hacer clic en **Settings** (icono de engranaje).
+  2. Ir a la sección **Resources** -> **WSL Integration**.
+  3. Asegurarse de que esté activada la opción **Enable integration with additional distros**.
+  4. Habilitar la casilla correspondiente a la distribución **Ubuntu**.
+  5. Hacer clic en **Apply & Restart**.
+
+### 3. Verificación de Docker dentro de WSL (Ubuntu)
+Abrir la terminal de Ubuntu en WSL y verificar que Docker responda correctamente:
 
 ```bash
-docker --version
-docker compose version
+docker version
+docker info
+```
+
+### 4. Ansible instalado en WSL
+Comprobar que Ansible esté instalado en WSL:
+
+```bash
+ansible --version
+```
+*(Si no está instalado, se instala con: `sudo apt update && sudo apt install -y ansible`)*
+
+---
+
+## 📥 Clonación y Configuración Inicial
+
+### 1. Clonar el Repositorio
+
+```bash
+git clone <URL_DEL_REPOSITORIO>
+cd mongo-ansible-v2
+```
+
+### 2. Configuración de Credenciales (Ansible Vault)
+
+El repositorio incluye el archivo plantilla de ejemplo `vars/vault_mongodb.example.yml`:
+
+```yaml
+---
+mongo_admin_user: "admin"
+mongo_admin_password: "CAMBIAR_PASSWORD"
+```
+
+Cada persona debe generar su propio archivo de variables encriptado:
+
+```bash
+# 1. Copiar la plantilla de ejemplo
+cp vars/vault_mongodb.example.yml vars/vault_mongodb.yml
+
+# 2. Editar el archivo y definir la contraseña deseada
+nano vars/vault_mongodb.yml
+
+# 3. Encriptar el archivo con Ansible Vault (ingresa una contraseña que recuerdes)
+ansible-vault encrypt vars/vault_mongodb.yml
+```
+
+> ⚠️ **IMPORTANTE:**
+> **No** debes crear manualmente el keyfile criptográfico, ni el secret de Docker, ni la red overlay, ni los volúmenes, ni el Replica Set, ni el usuario en MongoDB. **Los playbooks de Ansible se encargan automáticamente de todo ese proceso.**
+
+> 💡 **MongoDB Compass (Opcional):**
+> MongoDB Compass es **totalmente opcional**. Solo se requiere si deseas inspeccionar de forma gráfica la base de datos `prueba_ha`, las colecciones, los documentos y el estado de la replicación/failover en tiempo real.
+
+---
+
+## 🔍 Verificación Previa al Despliegue
+
+Antes de iniciar el despliegue, verifica que estás en la carpeta correcta y que la estructura del proyecto esté completa:
+
+```bash
+pwd
+ls
+```
+
+Deberías ver al menos los siguientes archivos y directorios:
+
+```text
+ansible.cfg
+inventory.ini
+playbooks/
+vars/
+secrets/
+README.md
 ```
 
 ---
 
-## 3. Estructura del Proyecto
+## 📁 Estructura del Proyecto
 
-El espacio de trabajo debe contener los siguientes archivos:
-
-```
-mongo_altadispnobilidad/
-├── docker-compose.yml    # Definición de servicios, volúmenes, red, healthchecks y servicio de inicialización
-├── init-rs.js            # Script automatizado e idempotente de inicialización del Replica Set
-├── mongo-keyfile         # Archivo de clave compartida para la autenticación interna del cluster
-└── README.md             # Guía paso a paso y documentación técnica
-```
-
-> **Nota sobre seguridad**: El archivo `mongo-keyfile` es utilizado por MongoDB para la autenticación entre miembros del Replica Set (`--keyFile`). El comando de inicio de cada contenedor ajusta automáticamente sus permisos a `chmod 400` antes de iniciar `mongod`.
-
----
-
-## 4. Parámetros de Configuración y Despliegue
-
-La siguiente tabla resume los parámetros exactos utilizados en el archivo `docker-compose.yml`:
-
-| Parámetro | Valor Configurado |
-|---|---|
-| **Versión de Imagen** | `mongo:7-jammy` |
-| **Nombre del Replica Set** | `rs0` |
-| **Red Docker** | `mongo_altadispnobilidad_net-iess` (`net-iess`) |
-| **Usuario Administrador** | `mongo_user` |
-| **Contraseña** | `mongo_password` |
-| **Base de Autenticación** | `admin` |
-| **Base de Datos de Pruebas** | `auditoria_iess_db` |
-| **Colección de Pruebas** | `prueba_ha` |
-| **Contenedor 1** | `ctn-mongo-auditoria-1` (host: `mongo1`, puerto: `27017:27017`) |
-| **Contenedor 2** | `ctn-mongo-auditoria-2` (host: `mongo2`, puerto: `27018:27017`) |
-| **Contenedor 3** | `ctn-mongo-auditoria-3` (host: `mongo3`, puerto: `27019:27017`) |
-| **Contenedor Inicializador** | `ctn-mongo-init` (ejecuta `init-rs.js` contra `mongo1` tras healthchecks) |
-
----
-
-## 5. Creación de la Infraestructura
-
-### Paso 5.1: Iniciar los Contenedores y la Automatización
-Ejecute el siguiente comando para levantar los servicios en segundo plano:
-
-```bash
-docker compose up -d
-```
-
-### Paso 5.2: Validar el Estado de los Contenedores
-Verifique que los tres nodos principales estén en estado activo (`Up`), saludables (`healthy`) y que el contenedor inicializador haya finalizado con éxito (`Exited (0)`):
-
-```bash
-docker ps -a
-```
-
-*Resultado esperado*:
-* `ctn-mongo-auditoria-1`: `Up ... (healthy)`
-* `ctn-mongo-auditoria-2`: `Up ... (healthy)`
-* `ctn-mongo-auditoria-3`: `Up ... (healthy)`
-* `ctn-mongo-init`: `Exited (0)`
-
-### Paso 5.3: Revisar Registros de Inicio e Inicialización (Opcional)
-Para confirmar la ejecución automatizada de `init-rs.js`:
-
-```bash
-docker logs ctn-mongo-init
-```
-
-O para consultar los logs de los nodos individuales:
-
-```bash
-docker logs ctn-mongo-auditoria-1
-docker logs ctn-mongo-auditoria-2
-docker logs ctn-mongo-auditoria-3
+```text
+mongo-ansible-v2/
+├── ansible.cfg                    # Configuración global de Ansible
+├── inventory.ini                  # Inventario local de ejecución
+├── README.md                      # Documentación y guía completa de uso
+├── .gitignore                     # Exclusión de secretos y temporales
+│
+├── playbooks/
+│   ├── infrastructure/            # Configuración de Docker Swarm y Redes
+│   │   ├── swarm_setup.yml        # Inicialización de Docker Swarm
+│   │   ├── network_setup.yml      # Creación de red overlay mongo_swarm_net
+│   │   └── expose_mongo1_compass.yml # Publicación de mongo1 en modo host para Compass
+│   │
+│   ├── security/                  # Generación de KeyFile y Docker Secret
+│   │   ├── keyfile_setup.yml      # Generación local del keyfile (permisos 0600)
+│   │   └── keyfile_secret.yml     # Creación del Docker Secret mongo_keyfile en Swarm
+│   │
+│   ├── mongodb/                   # Servicios y configuración del Replica Set
+│   │   ├── mongo_services.yml     # Creación del servicio inicial mongo1 con auth y keyfile
+│   │   ├── mongo_replset.yml      # Inicialización del Replica Set rs0 en mongo1
+│   │   ├── mongo_create_admin.yml # Creación del usuario administrador MongoDB
+│   │   ├── mongo_replset_nodes.yml # Creación de servicios mongo2 y mongo3
+│   │   ├── mongo_replset_add_nodes.yml # Incorporación de nodos al Replica Set
+│   │   └── configure_priorities.yml # Configuración de prioridades de elección en rs0
+│   │
+│   ├── validation/                # Validaciones de conectividad y estado
+│   │   ├── validate_mongodb.yml   # Verificación general de Swarm, red, secret y mongo1
+│   │   └── validate_replset.yml   # Verificación de autenticación y estado del Replica Set
+│   │
+│   ├── tests/                     # Pruebas automatizadas de resiliencia y datos
+│   │   ├── test_replication_data.yml # Inserción de datos de prueba en la base prueba_ha
+│   │   ├── test_high_availability.yml # Prueba de failover, caída de nodo y recuperación
+│   │   ├── cleanup_test_data.yml     # Eliminación selectiva de la base prueba_ha
+│   │   └── reset_local_environment.yml # Reset total y limpieza de contenedores y volúmenes V2
+│   │
+│   └── recovery/                  # Playbooks de contingencia y rescate
+│       ├── mongo_recover_admin.yml # Recuperación y reconfiguración de admin
+│       └── recover_mongo1.yml     # Reactivación y escala de mongo1
+│
+├── vars/
+│   ├── vault_mongodb.example.yml  # Plantilla de variables para el cluster
+│   └── vault_mongodb.yml          # Credenciales encriptadas (Ansible Vault)
+│
+└── secrets/
+    └── mongo-keyfile              # Archivo criptográfico generado para el cluster (0600)
 ```
 
 ---
 
-## 6. Acceso a MongoDB (`mongosh`)
+## 🚀 Guía de Despliegue y Ejecución Paso a Paso
 
-Para interactuar con cada instancia de MongoDB a través del cliente `mongosh`, utilice los siguientes comandos autenticados:
+> 📌 **Nota:** Ejecuta todos los comandos desde la raíz del proyecto (`mongo-ansible-v2/`). Cuando el comando incluya `--ask-vault-pass`, introduce la contraseña con la que encriptaste `vars/vault_mongodb.yml`.
 
-* **Acceso al nodo 1 (`mongo1`)**:
+### 1. Infraestructura y Redes Swarm
+
+```bash
+# Inicializar Docker Swarm en el nodo local
+ansible-playbook playbooks/infrastructure/swarm_setup.yml
+
+# Crear la red overlay mongo_swarm_net attachable
+ansible-playbook playbooks/infrastructure/network_setup.yml
+```
+
+### 2. Seguridad y Autenticación Interna (KeyFile)
+
+```bash
+# Generar el keyfile criptográfico local con permisos restrictivos 0600
+ansible-playbook playbooks/security/keyfile_setup.yml
+
+# Crear el Docker Secret en Swarm a partir del keyfile generado
+ansible-playbook playbooks/security/keyfile_secret.yml
+```
+
+*(Opcional: puedes comprobar los recursos creados con `docker secret ls` y `docker network ls | grep mongo_swarm_net`)*
+
+### 3. Despliegue de Servicios MongoDB y Creación del Replica Set
+
+```bash
+# Desplegar el servicio principal mongo1
+ansible-playbook playbooks/mongodb/mongo_services.yml
+
+# Inicializar el Replica Set rs0 en mongo1
+ansible-playbook playbooks/mongodb/mongo_replset.yml
+
+# Desplegar los servicios secundarios mongo2 y mongo3
+ansible-playbook playbooks/mongodb/mongo_replset_nodes.yml
+```
+
+### 4. Creación del Usuario Administrador
+
+```bash
+# Crear el usuario administrador en MongoDB (requiere Vault)
+ansible-playbook playbooks/mongodb/mongo_create_admin.yml --ask-vault-pass
+```
+
+### 5. Incorporación de Nodos y Configuración de Prioridades
+
+```bash
+# Agregar mongo2 y mongo3 al Replica Set rs0 (requiere Vault)
+ansible-playbook playbooks/mongodb/mongo_replset_add_nodes.yml --ask-vault-pass
+
+# Configurar prioridades de elección (mongo1 con mayor prioridad)
+ansible-playbook playbooks/mongodb/configure_priorities.yml --ask-vault-pass
+```
+
+### 6. Validación del Cluster
+
+```bash
+# Validar infraestructura básica, red, secret y contenedor mongo1
+ansible-playbook playbooks/validation/validate_mongodb.yml
+
+# Validar estado del Replica Set y autenticación en todos los nodos (requiere Vault)
+ansible-playbook playbooks/validation/validate_replset.yml --ask-vault-pass
+```
+
+---
+
+## 🧪 Pruebas de Replicación y Alta Disponibilidad (HA)
+
+### 7. Inserción de Datos de Prueba
+
+Inserta una base de datos `prueba_ha` con la colección `registros` en el nodo PRIMARY para verificar la replicación automática hacia los SECONDARY:
+
+```bash
+ansible-playbook playbooks/tests/test_replication_data.yml --ask-vault-pass
+```
+
+### 8. Prueba de Alta Disponibilidad y Failover
+
+Simula la caída forzada del nodo PRIMARY (`mongo1`), verifica la elección inmediata de un nuevo PRIMARY entre los nodos secundarios, reactiva `mongo1` y comprueba la reincorporación y consistencia del cluster:
+
+```bash
+ansible-playbook playbooks/tests/test_high_availability.yml --ask-vault-pass
+```
+
+---
+
+## 🧭 Conexión con MongoDB Compass (Opcional)
+
+Si deseas conectarte gráficamente desde MongoDB Compass en Windows:
+
+1. **Exponer el puerto de `mongo1` en modo host:**
+   ```bash
+   ansible-playbook playbooks/infrastructure/expose_mongo1_compass.yml
+   ```
+
+2. **Abrir MongoDB Compass** y conectarse con la siguiente cadena de conexión (reemplaza `<PASSWORD>` por tu contraseña configurada en Vault):
+   ```text
+   mongodb://admin:<PASSWORD>@localhost:27017/?authSource=admin&replicaSet=rs0&directConnection=true
+   ```
+
+---
+
+## 🧹 Limpieza y Reseteo del Entorno
+
+### Limpieza de Datos de Prueba
+Para eliminar únicamente la base de datos `prueba_ha` sin alterar los servicios ni la estructura del Replica Set:
+
+```bash
+ansible-playbook playbooks/tests/cleanup_test_data.yml --ask-vault-pass
+```
+
+### Reset Completo del Entorno Local V2
+Para destruir y limpiar todos los servicios (`mongo1`, `mongo2`, `mongo3`), contenedores, volúmenes asociados (`mongo1_data`, `mongo2_data`, `mongo3_data`) y el secret `mongo_keyfile`, dejando el entorno listo para un nuevo despliegue desde cero (preserva Docker Swarm y la red overlay):
+
+```bash
+ansible-playbook playbooks/tests/reset_local_environment.yml
+```
+
+---
+
+## 🛟 Playbooks de Recuperación y Contingencia
+
+- **Recuperar / Reconfigurar usuario administrador:**
   ```bash
-  docker exec -it ctn-mongo-auditoria-1 mongosh -u mongo_user -p mongo_password --authenticationDatabase admin
+  ansible-playbook playbooks/recovery/mongo_recover_admin.yml --ask-vault-pass
   ```
-
-* **Acceso al nodo 2 (`mongo2`)**:
+- **Reactivar / Escalar `mongo1` tras parada manual:**
   ```bash
-  docker exec -it ctn-mongo-auditoria-2 mongosh -u mongo_user -p mongo_password --authenticationDatabase admin
+  ansible-playbook playbooks/recovery/recover_mongo1.yml
   ```
 
-* **Acceso al nodo 3 (`mongo3` - Árbitro)**:
-  ```bash
-  docker exec -it ctn-mongo-auditoria-3 mongosh -u mongo_user -p mongo_password --authenticationDatabase admin
-  ```
-
-> Las operaciones administrativas y de replicación se ejecutan inicialmente conectado a `mongo1`.
-
 ---
 
-## 7. Configuración del Replica Set
-
-### Paso 7.1: Inicializar el Replica Set en `mongo1`
-Ingrese a la consola interactiva de `mongo1`:
-
-```bash
-docker exec -it ctn-mongo-auditoria-1 mongosh -u mongo_user -p mongo_password --authenticationDatabase admin
-```
-
-Inicialice el Replica Set `rs0` asignando mayor prioridad a `mongo1`:
-
-```javascript
-rs.initiate({
-  _id: "rs0",
-  members: [
-    {
-      _id: 0,
-      host: "mongo1:27017",
-      priority: 2
-    }
-  ]
-})
-```
-
-*Resultado esperado*: `{ ok: 1 }`. El prompt cambiará a `rs0 [direct: primary] admin>`.
-
-### Paso 7.2: Verificar el Estado Inicial
-Compruebe el estado del conjunto y el rol del nodo:
-
-```javascript
-rs.status()
-```
-
-O verifique con el comando `hello`:
-
-```javascript
-db.hello()
-```
-
-*Resultado esperado*: `mongo1:27017` figura con `stateStr: "PRIMARY"` e `isWritablePrimary: true`.
-
----
-
-## 8. Incorporación del Nodo Secundario (`mongo2`)
-
-Desde la sesión en `mongo1` (PRIMARY), agregue el segundo nodo de datos:
-
-```javascript
-rs.add("mongo2:27017")
-```
-
-*Resultado esperado*: `{ ok: 1 }`.
-
-### Verificación:
-Consulte nuevamente el estado del Replica Set:
-
-```javascript
-rs.status()
-```
-
-*Resultado esperado*:
-* `mongo1:27017` → `PRIMARY`
-* `mongo2:27017` → `SECONDARY`
-* `votingMembersCount`: `2`
-* `writableVotingMembersCount`: `2`
-
----
-
-## 9. Configuración del Write Concern Global
-
-En MongoDB 7, al incorporar un árbitro en un conjunto que cuenta con un número par de nodos de datos, se genera la validación `NewReplicaSetConfigurationIncompatible` si el *Write Concern* por defecto no está explícitamente configurado para soportar mayorías de nodos escribibles.
-
-### Paso 9.1: Consultar el Write Concern Actual
-Ejecute en `mongo1`:
-
-```javascript
-db.adminCommand({
-  getDefaultRWConcern: 1
-})
-```
-
-### Paso 9.2: Establecer `w: "majority"`
-Configure de forma explícita el Write Concern global para evitar bloqueos e incompatibilidades:
-
-```javascript
-db.adminCommand({
-  setDefaultRWConcern: 1,
-  defaultWriteConcern: {
-    w: "majority",
-    wtimeout: 0
-  }
-})
-```
-
-### Paso 9.3: Confirmar la Configuración
-Vuelva a consultar para verificar:
-
-```javascript
-db.adminCommand({
-  getDefaultRWConcern: 1
-})
-```
-
-*Resultado esperado*:
-```javascript
-{
-  defaultWriteConcern: { w: 'majority', wtimeout: 0 },
-  defaultWriteConcernSource: 'global',
-  ok: 1
-}
-```
-
----
-
-## 10. Incorporación del Nodo Árbitro (`mongo3`)
-
-Una vez ajustado el Write Concern, proceda a registrar el árbitro desde `mongo1`:
-
-```javascript
-rs.addArb("mongo3:27017")
-```
-
-*Resultado esperado*: `{ ok: 1 }`.
-
-### Verificación del Conjunto Completo:
-Ejecute:
-
-```javascript
-rs.status()
-```
-
-*Resultado esperado*:
-* `mongo1:27017` → `stateStr: "PRIMARY"`
-* `mongo2:27017` → `stateStr: "SECONDARY"`
-* `mongo3:27017` → `stateStr: "ARBITER"`
-* `votingMembersCount`: `3`
-* `writableVotingMembersCount`: `2`
-
----
-
-## 11. Verificación Inicial de Replicación de Datos
-
-### Paso 11.1: Insertar Documento en el PRIMARY (`mongo1`)
-Desde `mongo1`, seleccione la base de datos `auditoria_iess_db` e inserte un documento en la colección `prueba_ha`:
-
-```javascript
-use auditoria_iess_db
-
-db.prueba_ha.insertOne({
-  mensaje: "Prueba de alta disponibilidad",
-  fecha: new Date(),
-  origen: "mongo1"
-})
-```
-
-Compruebe la inserción local:
-
-```javascript
-db.prueba_ha.find()
-```
-
-### Paso 11.2: Validar la Replicación en el SECONDARY (`mongo2`)
-Abra una nueva terminal e ingrese a `mongo2`:
-
-```bash
-docker exec -it ctn-mongo-auditoria-2 mongosh -u mongo_user -p mongo_password --authenticationDatabase admin
-```
-
-Consulte la colección en `mongo2`:
-
-```javascript
-use auditoria_iess_db
-
-db.prueba_ha.find()
-```
-
-*Resultado esperado*: El documento insertado en `mongo1` se visualiza inmediatamente en `mongo2`.
-
----
-
-## 12. Inspección del Estado y Métricas de Replicación
-
-### Paso 12.1: Campos Clave de `rs.status()`
-Al ejecutar `rs.status()`, preste especial atención a las siguientes propiedades de cada miembro:
-
-* **`name`**: Identificador de host y puerto del nodo (`host:puerto`).
-* **`health`**: Estado de salud (`1` = operativo, `0` = inalcanzable).
-* **`stateStr`**: Rol actual en el cluster (`PRIMARY`, `SECONDARY`, `ARBITER`).
-* **`syncSourceHost`**: Host desde el cual el nodo secundario está replicando operaciones.
-* **`optime` / `optimeDate`**: Marca de tiempo del último registro del *oplog* aplicado en el nodo.
-
-### Paso 12.2: Verificar Retraso de Replicación (*Replication Lag*)
-Desde `mongo1`, ejecute:
-
-```javascript
-rs.printSecondaryReplicationInfo()
-```
-
-*Resultado esperado*:
-```
-source: mongo2:27017
-syncedTo: Wed Aug 19 2026 ...
-0 secs (0 hrs) behind the primary
-```
-Un retraso de `0 secs` certifica que el nodo secundario está al día con respecto al primario.
-
----
-
-## 13. Simulación de Caída del PRIMARY (*Failover*)
-
-Para comprobar la tolerancia a fallos, forzaremos la caída del nodo primario actual.
-
-### Paso 13.1: Confirmar el PRIMARY Actual
-En `mongosh`:
-
-```javascript
-rs.status()
-```
-Confirmamos que `mongo1` posee el rol `PRIMARY`. Salga de `mongosh`:
-
-```javascript
-exit
-```
-
-### Paso 13.2: Detener el Contenedor `mongo1`
-Desde la terminal PowerShell / Bash:
-
-```bash
-docker stop ctn-mongo-auditoria-1
-```
-
-Verifique que el contenedor se detuvo:
-
-```bash
-docker ps
-```
-
-*Resultado esperado*: Solo `ctn-mongo-auditoria-2` y `ctn-mongo-auditoria-3` permanecen en ejecución.
-
----
-
-## 14. Verificación de la Elección Automática
-
-Acceda a `mongo2` inmediatamente tras la caída de `mongo1`:
-
-```bash
-docker exec -it ctn-mongo-auditoria-2 mongosh -u mongo_user -p mongo_password --authenticationDatabase admin
-```
-
-Consulte el estado del Replica Set:
-
-```javascript
-rs.status()
-```
-
-### Análisis del Resultado:
-1. **`mongo2` ha sido promovido**: Su `stateStr` pasa a `"PRIMARY"`.
-2. **`mongo1` es detectado como inactivo**: Su `health` es `0` y `stateStr` muestra `"(not reachable/healthy)"`.
-3. **`mongo3` (Árbitro)**: Permanece como `"ARBITER"` y emitió el voto necesario para que `mongo2` alcanzara la mayoría de votos requerida (2 de 3 votos = 66.7%).
-
-Esto demuestra el mecanismo de **elección automática y failover sin intervención humana**.
-
----
-
-## 15. Escritura Continua Durante la Caída de `mongo1`
-
-Con `mongo1` aún fuera de servicio, verifique que el clúster sigue aceptando escrituras a través del nuevo nodo primario (`mongo2`).
-
-Desde `mongo2` (PRIMARY):
-
-```javascript
-use auditoria_iess_db
-
-db.prueba_ha.insertOne({
-  mensaje: "Escritura después de caída de mongo1",
-  fecha: new Date(),
-  origen: "mongo2"
-})
-```
-
-Compruebe la colección:
-
-```javascript
-db.prueba_ha.find()
-```
-
-*Resultado esperado*: Se visualizan tanto el registro original como el nuevo registro creado durante la contingencia.
-
----
-
-## 16. Recuperación y Reincorporación de `mongo1`
-
-### Paso 16.1: Reiniciar el Contenedor
-Salga de `mongosh` en `mongo2` (`exit`) y levante el contenedor `ctn-mongo-auditoria-1` desde la terminal:
-
-```bash
-docker start ctn-mongo-auditoria-1
-```
-
-Espere entre 5 y 10 segundos para que el servicio inicie y establezca comunicación con la red Docker.
-
-### Paso 16.2: Conectarse a `mongo1`
-Acceda nuevamente a `mongo1`:
-
-```bash
-docker exec -it ctn-mongo-auditoria-1 mongosh -u mongo_user -p mongo_password --authenticationDatabase admin
-```
-
-Ejecute:
-
-```javascript
-rs.status()
-```
-
-*Resultado esperado*: `mongo1` se reincorpora con éxito al conjunto. Debido a que tiene asignada `priority: 2`, el clúster negociará y devolverá a `mongo1` el rol de `PRIMARY`, mientras que `mongo2` regresará a `SECONDARY`.
-
----
-
-## 17. Verificación de Resincronización de Datos
-
-Compruebe que los datos escritos en `mongo2` durante el periodo en que `mongo1` estuvo apagado fueron replicados automáticamente a `mongo1`.
-
-Desde `mongo1`:
-
-```javascript
-use auditoria_iess_db
-
-db.prueba_ha.find().sort({fecha: 1})
-```
-
-*Resultado esperado*: Se listan los dos documentos ordenados cronológicamente:
-1. `{"mensaje": "Prueba de alta disponibilidad", "origen": "mongo1"}`
-2. `{"mensaje": "Escritura después de caída de mongo1", "origen": "mongo2"}`
-
-### Verificación Final del Replication Lag
-Ejecute en `mongo1`:
-
-```javascript
-rs.printSecondaryReplicationInfo()
-```
-
-*Resultado obtenido*:
-```
-source: mongo2:27017
-syncedTo: Wed Aug 19 2026 ...
-0 secs (0 hrs) behind the primary
-```
-
-Esto confirma la total consistencia y sincronización del clúster.
-
----
-
-## 18. Resumen de la Prueba de Alta Disponibilidad
-
-| Etapa | Acción Realizada | Resultado Esperado / Observado | Estado del Cluster |
-|:---|:---|:---|:---|
-| **1. Despliegue** | `docker compose up -d` | 3 contenedores activos y saludables | Nodos independientes |
-| **2. Inicialización** | `rs.initiate(...)` en `mongo1` | `mongo1` asume rol `PRIMARY` | `rs0` (1 nodo) |
-| **3. Agregar Secundario** | `rs.add("mongo2:27017")` | `mongo2` se sincroniza como `SECONDARY` | `rs0` (2 nodos de datos) |
-| **4. Write Concern** | `setDefaultRWConcern` a `majority` | Configuración global compatible establecida | Write concern validado |
-| **5. Agregar Árbitro** | `rs.addArb("mongo3:27017")` | `mongo3` registrado como `ARBITER` | `rs0` (3 nodos / 2 datos + 1 arb) |
-| **6. Replicación Inicial** | `insertOne` en `mongo1` | Documento visible en `mongo2` | Replicación activa |
-| **7. Fallo del Primario** | `docker stop ctn-mongo-auditoria-1` | `mongo1` queda inalcanzable | Quórum 2/3 disponible |
-| **8. Elección Automática** | Verificación en `mongo2` | `mongo2` es electo nuevo `PRIMARY` | Failover completado |
-| **9. Escritura en Fallo** | `insertOne` en `mongo2` | Escritura exitosa en nuevo primario | Disponibilidad de escritura |
-| **10. Recuperación** | `docker start ctn-mongo-auditoria-1` | `mongo1` se reincorpora al cluster | Sincronización automática |
-| **11. Consistencia Final** | `find()` y `rs.printSecondaryReplicationInfo()` | Todos los datos presentes (`replLag = 0s`) | Consistencia restaurada |
-
----
-
-## 19. Comandos de Diagnóstico Frecuentes
-
-### Gestión de Contenedores (Docker)
-```bash
-# Listar contenedores en ejecución
-docker ps
-
-# Listar servicios administrados por Compose
-docker compose ps
-
-# Visualizar registros en tiempo real de cada nodo
-docker logs -f ctn-mongo-auditoria-1
-docker logs -f ctn-mongo-auditoria-2
-docker logs -f ctn-mongo-auditoria-3
-```
-
-### Consultas de Estado en MongoDB (`mongosh`)
-```javascript
-// Estado detallado de los miembros del Replica Set
-rs.status()
-
-// Configuración actual del Replica Set (prioridades, votos, hosts)
-rs.conf()
-
-// Resumen del nodo y topología actual
-db.hello()
-
-// Diagnóstico de retraso de replicación de nodos secundarios
-rs.printSecondaryReplicationInfo()
-
-// Consulta del Write Concern por defecto
-db.adminCommand({ getDefaultRWConcern: 1 })
-```
-
----
-
-## 20. Solución de Problemas Comunes
-
-### 1. Error `NewReplicaSetConfigurationIncompatible` al agregar el Árbitro
-* **Causa**: MongoDB 7 valida que las opciones de *Write Concern* por defecto satisfagan los requisitos de quórum de nodos con capacidad de escritura. Al agregar un árbitro a un conjunto con 2 nodos de datos, se requiere una definición explícita.
-* **Solución**:
-  Ejecutar en el PRIMARY antes de agregar el árbitro:
-  ```javascript
-  db.adminCommand({
-    setDefaultRWConcern: 1,
-    defaultWriteConcern: {
-      w: "majority",
-      wtimeout: 0
-    }
-  })
-  ```
-  Luego reintentar:
-  ```javascript
-  rs.addArb("mongo3:27017")
-  ```
-
-### 2. Error de Resolución de Nombres de Red (`NodeNotFound` / `HostUnreachable`)
-* **Causa**: Uno o más contenedores no pueden resolver los nombres `mongo1:27017`, `mongo2:27017` o `mongo3:27017`.
-* **Solución**:
-  Verifique que todos los contenedores pertenezcan a la red `net-iess`:
-  ```bash
-  docker network inspect mongo_altadispnobilidad_net-iess
-  ```
-  Asegúrese de que los hostnames coincidan con la directiva `hostname` definida en el archivo `docker-compose.yml`.
-
-### 3. Error `permissions on /etc/mongo-keyfile are too open`
-* **Causa**: MongoDB exige que el archivo de clave tenga permisos restrictivos (`chmod 400` o `600`) y pertenezca al usuario de ejecución.
-* **Solución**:
-  Verifique que en `docker-compose.yml` el comando de inicio incluya `chmod 400 /etc/mongo-keyfile` previo a `mongod`, y que el montaje no tenga la directiva `:ro` para permitir el cambio de permisos en el contenedor.
-
----
-
-## 21. Conclusión
-
-La práctica realizada demostró de manera empírica y reproducible el funcionamiento de la **Alta Disponibilidad en MongoDB 7**:
-
-1. **Tolerancia a fallos**: La caída abrupta del nodo primario no detuvo el servicio ni provocó pérdida de información.
-2. **Quórum con árbitro**: La presencia de `mongo3` garantizó una mayoría estricta (2 de 3 votos), permitiendo promover a `mongo2` como nuevo primario sin requerir un tercer nodo de almacenamiento completo.
-3. **Continuidad de operaciones**: Las operaciones de lectura y escritura continuaron ejecutándose durante la ventana de contingencia.
-4. **Resincronización automática**: Al restablecerse el nodo caído, este se reintegró al Replica Set, aplicó las operaciones pendientes del *oplog* y alcanzó un retraso de replicación de `0 segundos`.
+## 🔒 Seguridad y Buenas Prácticas
+
+- Los archivos sensibles (`vars/vault_mongodb.yml` y `secrets/mongo-keyfile`) se configuran con permisos `0600` y están excluidos del control de versiones mediante `.gitignore`.
+- Se suministra la plantilla pública `vars/vault_mongodb.example.yml` para que cada desarrollador configure de forma independiente y segura sus credenciales.
+- Todos los playbooks emplean `playbook_dir` para garantizar resolución de rutas relativa, portable y determinística.

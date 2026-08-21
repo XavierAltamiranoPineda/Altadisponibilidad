@@ -1,0 +1,260 @@
+
+---
+- name: Recuperar usuario administrador MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    mongo_service: "mongo1"
+    mongo_image: "mongo:7-jammy"
+    mongo_network: "mongo_swarm_net"
+    mongo_secret: "mongo_keyfile"
+    mongo_volume: "mongo1_data"
+    mongo_keyfile_path: "/etc/mongo-keyfile"
+
+  tasks:
+
+    # ============================================================
+    # 1. VERIFICAR SERVICIO
+    # ============================================================
+
+    - name: Verificar servicio mongo1
+      ansible.builtin.command:
+        cmd: docker service inspect {{ mongo_service }}
+      register: mongo_check
+      changed_when: false
+      failed_when: false
+
+    - name: Validar existencia de mongo1
+      ansible.builtin.assert:
+        that:
+          - mongo_check.rc == 0
+        fail_msg: "El servicio mongo1 no existe."
+        success_msg: "OK: Servicio mongo1 encontrado."
+
+    # ============================================================
+    # 2. ELIMINAR SOLO EL SERVICIO
+    #    NO SE ELIMINA EL VOLUMEN
+    # ============================================================
+
+    - name: Detener servicio mongo1 temporalmente
+      ansible.builtin.command:
+        cmd: docker service rm {{ mongo_service }}
+      when: mongo_check.rc == 0
+
+    - name: Esperar eliminación del servicio
+      ansible.builtin.command:
+        cmd: docker service inspect {{ mongo_service }}
+      register: mongo_deleted
+      retries: 10
+      delay: 2
+      until: mongo_deleted.rc != 0
+      changed_when: false
+      failed_when: false
+
+    # ============================================================
+    # 3. LEVANTAR MONGO TEMPORALMENTE SIN --auth
+    # ============================================================
+
+    - name: Crear MongoDB temporal sin autenticación
+      ansible.builtin.command:
+        cmd: >
+          docker service create
+          --name {{ mongo_service }}
+          --network {{ mongo_network }}
+          --publish published=27017,target=27017
+          --secret source={{ mongo_secret }},target=mongo_keyfile
+          --mount type=volume,source={{ mongo_volume }},target=/data/db
+          {{ mongo_image }}
+          sh -c
+          "cp /run/secrets/mongo_keyfile {{ mongo_keyfile_path }} &&
+          chmod 400 {{ mongo_keyfile_path }} &&
+          exec mongod
+          --replSet rs0
+          --keyFile {{ mongo_keyfile_path }}
+          --bind_ip_all"
+      register: mongo_temp_create
+      changed_when: true
+
+    # ============================================================
+    # 4. ESPERAR MONGODB
+    # ============================================================
+
+    - name: Esperar MongoDB temporal
+      ansible.builtin.command:
+        cmd: docker service ps {{ mongo_service }} --format "{{ '{{.CurrentState}}' }}"
+      register: mongo_temp_state
+      retries: 20
+      delay: 3
+      until:
+        - mongo_temp_state.rc == 0
+        - "'Running' in mongo_temp_state.stdout"
+      changed_when: false
+
+    - name: Obtener contenedor mongo1
+      ansible.builtin.shell:
+        cmd: docker ps -q --filter name=mongo1
+      register: mongo_container
+      changed_when: false
+
+    - name: Validar contenedor MongoDB
+      ansible.builtin.assert:
+        that:
+          - mongo_container.stdout | trim != ""
+        fail_msg: "No se encontró el contenedor MongoDB."
+        success_msg: "OK: Contenedor MongoDB encontrado."
+
+    # ============================================================
+    # 5. CREAR / RESTABLECER ADMIN
+    # ============================================================
+
+    - name: Crear o actualizar usuario administrador
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo_container.stdout | trim }}
+          mongosh --quiet --eval
+          "db = db.getSiblingDB('admin');
+          u = db.getUser('{{ mongo_admin_user }}');
+          if (u == null) {
+            db.createUser({
+              user: '{{ mongo_admin_user }}',
+              pwd: '{{ mongo_admin_password }}',
+              roles: [{role: 'root', db: 'admin'}]
+            });
+            print('USUARIO_CREADO');
+          } else {
+            db.changeUserPassword(
+              '{{ mongo_admin_user }}',
+              '{{ mongo_admin_password }}'
+            );
+            print('PASSWORD_ACTUALIZADA');
+          }"
+      register: admin_reset
+      no_log: true
+
+    # ============================================================
+    # 6. DETENER SERVICIO TEMPORAL
+    # ============================================================
+
+    - name: Detener MongoDB temporal
+      ansible.builtin.command:
+        cmd: docker service rm {{ mongo_service }}
+
+    - name: Esperar eliminación de MongoDB temporal
+      ansible.builtin.command:
+        cmd: docker service inspect {{ mongo_service }}
+      register: mongo_temp_deleted
+      retries: 10
+      delay: 2
+      until: mongo_temp_deleted.rc != 0
+      changed_when: false
+      failed_when: false
+
+    # ============================================================
+    # 7. LEVANTAR MONGODB DEFINITIVO CON AUTH
+    # ============================================================
+
+    - name: Crear MongoDB definitivo con autenticación
+      ansible.builtin.command:
+        cmd: >
+          docker service create
+          --name {{ mongo_service }}
+          --network {{ mongo_network }}
+          --publish published=27017,target=27017
+          --secret source={{ mongo_secret }},target=mongo_keyfile
+          --mount type=volume,source={{ mongo_volume }},target=/data/db
+          {{ mongo_image }}
+          sh -c
+          "cp /run/secrets/mongo_keyfile {{ mongo_keyfile_path }} &&
+          chmod 400 {{ mongo_keyfile_path }} &&
+          exec mongod
+          --replSet rs0
+          --auth
+          --keyFile {{ mongo_keyfile_path }}
+          --bind_ip_all"
+      register: mongo_final_create
+      changed_when: true
+
+    # ============================================================
+    # 8. ESPERAR MONGODB DEFINITIVO
+    # ============================================================
+
+    - name: Esperar MongoDB definitivo
+      ansible.builtin.command:
+        cmd: docker service ps {{ mongo_service }} --format "{{ '{{.CurrentState}}' }}"
+      register: mongo_final_state
+      retries: 20
+      delay: 3
+      until:
+        - mongo_final_state.rc == 0
+        - "'Running' in mongo_final_state.stdout"
+      changed_when: false
+
+    - name: Obtener contenedor MongoDB definitivo
+      ansible.builtin.shell:
+        cmd: docker ps -q --filter name=mongo1
+      register: mongo_final_container
+      changed_when: false
+
+    # ============================================================
+    # 9. VALIDAR AUTENTICACIÓN
+    # ============================================================
+
+    - name: Validar usuario administrador
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo_final_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.adminCommand({connectionStatus:1}).ok"
+      register: admin_validation
+      changed_when: false
+      no_log: true
+
+    - name: Validar autenticación
+      ansible.builtin.assert:
+        that:
+          - admin_validation.stdout | trim == "1"
+        fail_msg: "ERROR: No fue posible autenticar al administrador."
+        success_msg: "OK: Usuario administrador autenticado."
+
+    # ============================================================
+    # 10. VALIDAR REPLICA SET
+    # ============================================================
+
+    - name: Validar Replica Set
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo_final_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "rs.status().set"
+      register: replset_validation
+      changed_when: false
+      no_log: true
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "        RECUPERACIÓN ADMIN MONGODB V2"
+          - "============================================================"
+          - ""
+          - "[OK] Servicio mongo1 restaurado"
+          - "[OK] Volumen mongo1_data conservado"
+          - "[OK] Replica Set: {{ replset_validation.stdout | trim }}"
+          - "[OK] Usuario: {{ mongo_admin_user }}"
+          - "[OK] Autenticación restaurada"
+          - "[OK] MongoDB ejecutándose con --auth"
+          - ""
+          - "============================================================"
+

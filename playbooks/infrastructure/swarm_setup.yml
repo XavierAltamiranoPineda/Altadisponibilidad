@@ -1,0 +1,80 @@
+---
+- name: Inicializar infraestructura Docker Swarm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+
+    # ==========================================================
+    # 1. VERIFICAR DOCKER
+    # ==========================================================
+
+    - name: Verificar Docker
+      ansible.builtin.command:
+        cmd: docker info
+      register: docker_info
+      changed_when: false
+
+    # ==========================================================
+    # 2. MOSTRAR ESTADO ACTUAL
+    # ==========================================================
+
+    - name: Mostrar estado de Docker Swarm
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "        DOCKER SWARM - V2"
+          - "============================================================"
+          - ""
+          - "Estado actual:"
+          - "{{ docker_info.stdout | regex_search('Swarm:.*') | default('No encontrado') }}"
+          - ""
+
+    # ==========================================================
+    # 3. OBTENER ESTADO DEL SWARM
+    # ==========================================================
+
+    - name: Consultar estado de Swarm
+      ansible.builtin.command:
+        cmd: docker info --format "{{ '{{.Swarm.LocalNodeState}}' }}"
+      register: swarm_state
+      changed_when: false
+
+    # ==========================================================
+    # 4. INICIALIZAR SWARM SI NO EXISTE
+    # ==========================================================
+
+    - name: Inicializar Docker Swarm
+      ansible.builtin.command:
+        cmd: docker swarm init
+      when: swarm_state.stdout | trim != "active"
+
+    # ==========================================================
+    # 5. VOLVER A CONSULTAR ESTADO
+    # ==========================================================
+
+    - name: Verificar estado final de Swarm
+      ansible.builtin.command:
+        cmd: docker info --format "{{ '{{.Swarm.LocalNodeState}}' }}"
+      register: final_swarm_state
+      changed_when: false
+
+    # ==========================================================
+    # 6. RESULTADO
+    # ==========================================================
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "        RESULTADO DOCKER SWARM"
+          - "============================================================"
+          - ""
+          - "[OK] Docker disponible"
+          - "[OK] Swarm configurado"
+          - "Estado: {{ final_swarm_state.stdout | trim }}"
+          - ""
+          - "============================================================"

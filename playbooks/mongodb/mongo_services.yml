@@ -1,0 +1,188 @@
+---
+- name: Crear servicios MongoDB en Docker Swarm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    mongo_image: "mongo:7-jammy"
+    mongo_network: "mongo_swarm_net"
+    mongo_secret: "mongo_keyfile"
+    mongo_keyfile_path: "/etc/mongo-keyfile"
+    mongo_service: "mongo1"
+    mongo_volume: "mongo1_data"
+
+  tasks:
+
+    # ============================================================
+    # 1. VERIFICAR DOCKER SWARM
+    # ============================================================
+
+    - name: Verificar estado de Docker Swarm
+      ansible.builtin.command:
+        cmd: docker info --format "{{ '{{.Swarm.LocalNodeState}}' }}"
+      register: swarm_state
+      changed_when: false
+
+    - name: Validar que Swarm esté activo
+      ansible.builtin.assert:
+        that:
+          - swarm_state.stdout == "active"
+        fail_msg: "Docker Swarm no está activo."
+        success_msg: "Docker Swarm está activo."
+
+    # ============================================================
+    # 2. VERIFICAR RED MONGODB
+    # ============================================================
+
+    - name: Verificar red MongoDB
+      ansible.builtin.command:
+        cmd: docker network inspect {{ mongo_network }}
+      register: mongo_network_check
+      changed_when: false
+      failed_when: false
+
+    - name: Validar existencia de la red
+      ansible.builtin.assert:
+        that:
+          - mongo_network_check.rc == 0
+        fail_msg: "La red {{ mongo_network }} no existe."
+        success_msg: "Red {{ mongo_network }} disponible."
+
+    # ============================================================
+    # 3. VERIFICAR DOCKER SECRET
+    # ============================================================
+
+    - name: Verificar secret MongoDB
+      ansible.builtin.command:
+        cmd: docker secret inspect {{ mongo_secret }}
+      register: mongo_secret_check
+      changed_when: false
+      failed_when: false
+
+    - name: Validar existencia del secret
+      ansible.builtin.assert:
+        that:
+          - mongo_secret_check.rc == 0
+        fail_msg: "El Docker Secret {{ mongo_secret }} no existe."
+        success_msg: "Docker Secret {{ mongo_secret }} disponible."
+
+    # ============================================================
+    # 4. VERIFICAR SERVICIO EXISTENTE
+    # ============================================================
+
+    - name: Verificar servicio mongo1
+      ansible.builtin.command:
+        cmd: docker service inspect {{ mongo_service }}
+      register: mongo1_check
+      changed_when: false
+      failed_when: false
+
+    - name: Eliminar servicio mongo1 anterior
+      ansible.builtin.command:
+        cmd: docker service rm {{ mongo_service }}
+      when: mongo1_check.rc == 0
+
+    - name: Esperar eliminación de servicio mongo1
+      ansible.builtin.command:
+        cmd: docker service inspect {{ mongo_service }}
+      register: mongo1_deleted
+      retries: 10
+      delay: 2
+      until: mongo1_deleted.rc != 0
+      changed_when: false
+      failed_when: false
+
+    # ============================================================
+    # 5. CREAR SERVICIO MONGODB
+    # ============================================================
+
+    - name: Crear servicio mongo1
+      ansible.builtin.command:
+        cmd: >
+          docker service create
+          --name {{ mongo_service }}
+          --network {{ mongo_network }}
+          --publish published=27017,target=27017
+          --secret source={{ mongo_secret }},target=mongo_keyfile
+          --mount type=volume,source={{ mongo_volume }},target=/data/db
+          {{ mongo_image }}
+          sh -c
+          "cp /run/secrets/mongo_keyfile {{ mongo_keyfile_path }} &&
+          chmod 400 {{ mongo_keyfile_path }} &&
+          exec mongod
+          --replSet rs0
+          --auth
+          --keyFile {{ mongo_keyfile_path }}
+          --bind_ip_all"
+      register: mongo1_create
+      changed_when: mongo1_create.rc == 0
+
+    # ============================================================
+    # 6. MOSTRAR RESULTADO DE CREACIÓN
+    # ============================================================
+
+    - name: Mostrar resultado de creación
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "        SERVICIO MONGODB V2"
+          - "============================================================"
+          - ""
+          - "[OK] Servicio mongo1 creado"
+          - "[OK] Imagen: {{ mongo_image }}"
+          - "[OK] Red: {{ mongo_network }}"
+          - "[OK] Secret: {{ mongo_secret }}"
+          - "[OK] KeyFile interno: {{ mongo_keyfile_path }}"
+          - "[OK] Volumen: {{ mongo_volume }}"
+          - ""
+          - "============================================================"
+
+    # ============================================================
+    # 7. ESPERAR INICIO DE MONGODB
+    # ============================================================
+
+    - name: Esperar que MongoDB inicie
+      ansible.builtin.command:
+        cmd: docker service ps {{ mongo_service }} --format "{{ '{{.CurrentState}}' }}"
+      register: mongo1_state
+      retries: 20
+      delay: 3
+      until:
+        - mongo1_state.rc == 0
+        - "'Running' in mongo1_state.stdout"
+      changed_when: false
+
+    # ============================================================
+    # 8. VERIFICAR RÉPLICAS
+    # ============================================================
+
+    - name: Verificar servicio MongoDB
+      ansible.builtin.command:
+        cmd: docker service ls --filter name={{ mongo_service }} --format "{{ '{{.Replicas}}' }}"
+      register: mongo1_replicas
+      changed_when: false
+
+    # ============================================================
+    # 9. MOSTRAR ESTADO FINAL
+    # ============================================================
+
+    - name: Mostrar estado final
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "        RESULTADO MONGODB V2"
+          - "============================================================"
+          - ""
+          - "[OK] Servicio mongo1 activo"
+          - "Réplicas: {{ mongo1_replicas.stdout }}"
+          - "Imagen: {{ mongo_image }}"
+          - "Red: {{ mongo_network }}"
+          - "Secret: {{ mongo_secret }}"
+          - "KeyFile: {{ mongo_keyfile_path }}"
+          - "Volumen: {{ mongo_volume }}"
+          - ""
+          - "============================================================"
+

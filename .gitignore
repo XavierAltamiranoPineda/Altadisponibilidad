@@ -1,0 +1,18 @@
+# Ansible Vault and Secrets
+vars/vault_mongodb.yml
+secrets/mongo-keyfile
+.vault_pass
+
+# Ansible retry files
+*.retry
+
+# Python byte code
+__pycache__/
+*.pyc
+*.pyo
+
+# OS and Editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
