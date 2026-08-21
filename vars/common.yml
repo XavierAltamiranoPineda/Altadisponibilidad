@@ -1,0 +1,31 @@
+---
+# ============================================================
+# VARIABLES COMUNES - MONGODB
+# ============================================================
+
+mongo_replica_set: "rs0"
+
+# ============================================================
+# VARIABLES COMUNES - BACKUP
+# ============================================================
+
+backup_checksum_algorithm: "sha256"
+backup_extension: ".archive.gz"
+
+backup_retention_days: 30
+backup_monthly_retention_months: 12
+
+backup_schedule_hour: "02"
+backup_schedule_minute: "00"
+
+backup_log_filename: "mongodb_backup.log"
+
+# ============================================================
+# MONGODB DATABASE TOOLS
+# ============================================================
+
+mongodb_tools_version: "100.18.0"
+mongodb_tools_version_policy: "supported_for_platform"
+mongodb_tools_root: "{{ playbook_dir }}/../../tools/mongodb-database-tools"
+mongodb_tools_platform: "ubuntu2604"
+mongodb_tools_arch: "x86_64"

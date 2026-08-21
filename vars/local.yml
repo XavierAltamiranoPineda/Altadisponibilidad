@@ -1,0 +1,26 @@
+---
+# ============================================================
+# AMBIENTE LOCAL
+# ============================================================
+
+environment_name: "local"
+
+# Base utilizada por las pruebas de Fase 1
+mongo_database: "prueba_ha"
+
+# Endpoint de conexion para backup local
+mongo_backup_host: "127.0.0.1"
+mongo_backup_port: 27017
+
+# Plataforma de herramientas para ambiente local
+mongodb_tools_platform: "ubuntu2604"
+mongodb_tools_arch: "x86_64"
+
+# Repositorio local de respaldos
+backup_root: "{{ playbook_dir }}/../../backups/mongodb"
+
+# Directorio local de logs
+backup_log_root: "{{ playbook_dir }}/../../logs"
+
+# Automatizacion local
+backup_scheduler: "cron"

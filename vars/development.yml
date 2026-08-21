@@ -1,0 +1,26 @@
+---
+# ============================================================
+# AMBIENTE DESARROLLO
+# ============================================================
+
+environment_name: "development"
+
+# Debe ser definido conforme al ambiente real
+mongo_database: "auditoria"
+
+# Endpoint de conexion para backup en desarrollo
+mongo_backup_host: "mongo1.dev.internal"
+mongo_backup_port: 27017
+
+# Plataforma de herramientas para ambiente de desarrollo
+mongodb_tools_platform: "ubuntu2404"
+mongodb_tools_arch: "x86_64"
+
+# Ruta de respaldo para desarrollo
+backup_root: "/backups/mongodb"
+
+# Ruta de logs
+backup_log_root: "/var/log/mongodb-backup"
+
+# Puede ser cron, Jenkins, Rundeck u otra herramienta institucional
+backup_scheduler: "cron"

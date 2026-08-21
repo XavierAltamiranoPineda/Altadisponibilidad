@@ -1,0 +1,227 @@
+---
+- name: Ejecutar respaldo MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  tasks:
+
+    # ============================================================
+    # FECHA, NOMBRE Y RUTAS
+    # ============================================================
+
+    - name: Obtener fecha y hora del respaldo
+      ansible.builtin.shell: |
+        echo "$(date +%Y%m%d_%H%M%S)|$(date +%Y-%m)"
+      register: backup_datetime
+      changed_when: false
+
+    - name: Definir nombres del respaldo
+      ansible.builtin.set_fact:
+        backup_timestamp: "{{ backup_datetime.stdout.split('|')[0] }}"
+        backup_month: "{{ backup_datetime.stdout.split('|')[1] }}"
+
+    - name: Definir rutas del respaldo
+      ansible.builtin.set_fact:
+        backup_directory: "{{ backup_root }}/{{ mongo_database }}/{{ backup_month }}"
+        backup_filename: "{{ mongo_database }}_{{ backup_timestamp }}{{ backup_extension }}"
+
+    - name: Crear directorio mensual de respaldo
+      ansible.builtin.file:
+        path: "{{ backup_directory }}"
+        state: directory
+        mode: "0700"
+
+    - name: Crear directorio de bitacoras
+      ansible.builtin.file:
+        path: "{{ backup_log_root }}"
+        state: directory
+        mode: "0700"
+
+    # ============================================================
+    # VALIDACION DE MONGODB DATABASE TOOLS
+    # ============================================================
+
+    - name: Obtener version de mongodump instalada en el host
+      ansible.builtin.command:
+        cmd: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongodump --version"
+      register: mongodump_version
+      changed_when: false
+
+    - name: Validar version aprobada de mongodump
+      ansible.builtin.assert:
+        that:
+          - "'mongodump version: ' ~ mongodb_tools_version in mongodump_version.stdout"
+        fail_msg: >-
+          [ERROR] Version incorrecta de mongodump.
+          Esperada: {{ mongodb_tools_version }}
+        success_msg: >-
+          [OK] mongodump {{ mongodb_tools_version }} validado
+
+    # ============================================================
+    # VALIDACION DEL REPLICA SET
+    # ============================================================
+
+    - name: Buscar un nodo MongoDB activo
+      ansible.builtin.shell: |
+        for service in mongo1 mongo2 mongo3; do
+          container=$(docker ps \
+            --filter "label=com.docker.swarm.service.name=${service}" \
+            --format '{{"{{"}}.ID{{"}}"}}' | head -n1)
+
+          if [ -n "$container" ]; then
+            echo "$container"
+            exit 0
+          fi
+        done
+        exit 1
+      register: mongo_available_container
+      changed_when: false
+
+    - name: Detectar PRIMARY actual
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          {{ mongo_available_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "db.hello().primary"
+          '
+      register: mongo_primary
+      changed_when: false
+      no_log: true
+
+    - name: Validar PRIMARY disponible
+      ansible.builtin.assert:
+        that:
+          - mongo_primary.stdout | length > 0
+          - "':' in mongo_primary.stdout"
+        fail_msg: "[ERROR] No se pudo detectar un PRIMARY activo"
+        success_msg: "[OK] PRIMARY disponible"
+
+    - name: Mostrar informacion de conexion y nodo PRIMARY
+      ansible.builtin.debug:
+        msg:
+          - "[OK] PRIMARY detectado: {{ mongo_primary.stdout }}"
+          - "[OK] Endpoint Backup Host: {{ mongo_backup_host }}:{{ mongo_backup_port }}"
+          - "[OK] Database Tools aprobadas: {{ mongodb_tools_version }}"
+
+    # ============================================================
+    # EJECUCION DEL BACKUP
+    # ============================================================
+
+    - name: Ejecutar mongodump desde el host
+      ansible.builtin.command:
+        argv:
+          - "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongodump"
+          - --host
+          - "{{ mongo_backup_host }}"
+          - --port
+          - "{{ mongo_backup_port | string }}"
+          - --username
+          - "{{ mongo_backup_user }}"
+          - --password
+          - "{{ mongo_backup_password }}"
+          - --authenticationDatabase
+          - "admin"
+          - --db
+          - "{{ mongo_database }}"
+          - --gzip
+          - "--archive={{ backup_directory }}/{{ backup_filename }}"
+      register: mongodump_result
+      changed_when: true
+      no_log: true
+
+    # ============================================================
+    # VALIDACION DEL ARCHIVO GENERADO
+    # ============================================================
+
+    - name: Obtener informacion del archivo generado
+      ansible.builtin.stat:
+        path: "{{ backup_directory }}/{{ backup_filename }}"
+        checksum_algorithm: sha256
+      register: backup_file
+
+    - name: Validar existencia y tamaño del respaldo
+      ansible.builtin.assert:
+        that:
+          - backup_file.stat.exists
+          - backup_file.stat.isreg
+          - backup_file.stat.size | int > 0
+        fail_msg: "[ERROR] El archivo de respaldo no fue generado correctamente"
+        success_msg: "[OK] Archivo de respaldo generado correctamente"
+
+    - name: Generar archivo SHA-256
+      ansible.builtin.shell: |
+        cd "{{ backup_directory }}"
+        sha256sum "{{ backup_filename }}" > "{{ backup_filename }}.sha256"
+      changed_when: true
+
+    - name: Validar checksum SHA-256
+      ansible.builtin.shell: |
+        cd "{{ backup_directory }}"
+        sha256sum -c "{{ backup_filename }}.sha256"
+      register: checksum_validation
+      changed_when: false
+
+    - name: Confirmar integridad del respaldo
+      ansible.builtin.assert:
+        that:
+          - checksum_validation.rc == 0
+        fail_msg: "[ERROR] Fallo la validacion SHA-256 del respaldo"
+        success_msg: "[OK] Integridad SHA-256 validada"
+
+    # ============================================================
+    # BITACORA
+    # ============================================================
+
+    - name: Registrar respaldo en bitacora
+      ansible.builtin.lineinfile:
+        path: "{{ backup_log_root }}/{{ backup_log_filename }}"
+        create: true
+        mode: "0600"
+        insertafter: EOF
+        line: >-
+          {{ backup_timestamp }}
+          | environment={{ environment_name }}
+          | database={{ mongo_database }}
+          | primary={{ mongo_primary.stdout }}
+          | host={{ mongo_backup_host }}:{{ mongo_backup_port }}
+          | tools_version={{ mongodb_tools_version }}
+          | file={{ backup_filename }}
+          | size={{ backup_file.stat.size }}
+          | checksum=OK
+          | result=SUCCESS
+
+    # ============================================================
+    # RESULTADO
+    # ============================================================
+
+    - name: Resultado final del respaldo
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "BACKUP MONGODB GENERADO EXITOSAMENTE"
+          - "============================================================"
+          - "Ambiente: {{ environment_name }}"
+          - "Base: {{ mongo_database }}"
+          - "PRIMARY: {{ mongo_primary.stdout }}"
+          - "Host Backup: {{ mongo_backup_host }}:{{ mongo_backup_port }}"
+          - "MongoDB Database Tools: {{ mongodb_tools_version }}"
+          - "Archivo: {{ backup_directory }}/{{ backup_filename }}"
+          - "Checksum: {{ backup_directory }}/{{ backup_filename }}.sha256"
+          - "Tamaño: {{ backup_file.stat.size }} bytes"
+          - "Integridad: OK"
+          - "============================================================"

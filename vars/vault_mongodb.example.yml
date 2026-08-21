@@ -1,3 +1,7 @@
 ---
 mongo_admin_user: "admin"
-mongo_admin_password: "CAMBIAR_PASSWORD"
+mongo_admin_password: "[PASSWORD]"
+mongo_backup_user: "backup_user"
+mongo_backup_password: "[PASSWORD]"
+mongo_restore_user: "restore_user"
+mongo_restore_password: "[PASSWORD]"

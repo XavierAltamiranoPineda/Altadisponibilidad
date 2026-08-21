@@ -1,0 +1,23 @@
+---
+# ============================================================
+# AMBIENTE PRODUCCION
+# ============================================================
+
+environment_name: "production"
+
+# Estos valores deben ser definidos por infraestructura
+mongo_database: "{{ production_mongo_database }}"
+
+# Endpoint de conexion para backup en produccion
+mongo_backup_host: "{{ production_mongo_backup_host }}"
+mongo_backup_port: "{{ production_mongo_backup_port }}"
+
+# Plataforma de herramientas para produccion
+mongodb_tools_platform: "{{ production_mongodb_tools_platform | default('ubuntu2404') }}"
+mongodb_tools_arch: "{{ production_mongodb_tools_arch | default('x86_64') }}"
+
+backup_root: "{{ production_backup_repository }}"
+backup_log_root: "{{ production_backup_log_root }}"
+
+# La herramienta definitiva sera definida institucionalmente
+backup_scheduler: "{{ production_backup_scheduler }}"

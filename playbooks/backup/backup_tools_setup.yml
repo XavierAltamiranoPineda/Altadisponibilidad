@@ -1,0 +1,236 @@
+---
+- name: Preparar MongoDB Database Tools para respaldos
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+
+  vars:
+    mongodb_tools_archive: "mongodb-database-tools-{{ mongodb_tools_platform }}-{{ mongodb_tools_arch }}-{{ mongodb_tools_version }}.tgz"
+    mongodb_tools_download_url: "https://fastdl.mongodb.org/tools/db/{{ mongodb_tools_archive }}"
+    mongodb_tools_download_path: "/tmp/{{ mongodb_tools_archive }}"
+    mongodb_tools_install_dir: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}"
+    mongodb_tools_extract_dir: "/tmp/mongodb-tools-{{ mongodb_tools_version }}"
+
+  tasks:
+
+    # ============================================================
+    # VALIDACION DEL SISTEMA
+    # ============================================================
+
+    - name: Obtener sistema operativo
+      ansible.builtin.shell: |
+        . /etc/os-release
+        echo "$ID"
+      register: detected_os
+      changed_when: false
+
+    - name: Obtener version del sistema operativo
+      ansible.builtin.shell: |
+        . /etc/os-release
+        echo "$VERSION_ID"
+      register: detected_os_version
+      changed_when: false
+
+    - name: Obtener arquitectura
+      ansible.builtin.command:
+        cmd: uname -m
+      register: detected_architecture
+      changed_when: false
+
+    - name: Validar arquitectura del sistema
+      ansible.builtin.assert:
+        that:
+          - detected_architecture.stdout == mongodb_tools_arch
+        fail_msg: >-
+          [ERROR] Arquitectura no compatible.
+          Detectada: {{ detected_architecture.stdout }}
+          Esperada: {{ mongodb_tools_arch }}
+        success_msg: "[OK] Arquitectura {{ detected_architecture.stdout }} validada"
+
+    - name: Validar compatibilidad de plataforma
+      ansible.builtin.assert:
+        that:
+          - (detected_os.stdout ~ (detected_os_version.stdout | replace('.', ''))) == mongodb_tools_platform
+        fail_msg: >-
+          [ERROR] Plataforma no compatible con la configuracion.
+          Detectada: {{ detected_os.stdout }}{{ detected_os_version.stdout | replace('.', '') }}
+          Esperada: {{ mongodb_tools_platform }}
+        success_msg: "[OK] Plataforma {{ mongodb_tools_platform }} validada"
+
+    # ============================================================
+    # CONFIGURACION
+    # ============================================================
+
+    - name: Mostrar configuracion
+      ansible.builtin.debug:
+        msg:
+          - "Version aprobada: {{ mongodb_tools_version }}"
+          - "Plataforma: {{ mongodb_tools_platform }}"
+          - "Arquitectura: {{ mongodb_tools_arch }}"
+          - "Politica: {{ mongodb_tools_version_policy }}"
+          - "Archivo: {{ mongodb_tools_archive }}"
+          - "Destino: {{ mongodb_tools_install_dir }}"
+
+    # ============================================================
+    # DIRECTORIOS
+    # ============================================================
+
+    - name: Crear directorio de herramientas
+      ansible.builtin.file:
+        path: "{{ mongodb_tools_install_dir }}"
+        state: directory
+        mode: "0755"
+
+    - name: Limpiar directorio temporal de extraccion
+      ansible.builtin.file:
+        path: "{{ mongodb_tools_extract_dir }}"
+        state: absent
+
+    - name: Crear directorio temporal de extraccion
+      ansible.builtin.file:
+        path: "{{ mongodb_tools_extract_dir }}"
+        state: directory
+        mode: "0755"
+
+    # ============================================================
+    # DESCARGA
+    # ============================================================
+
+    - name: Descargar MongoDB Database Tools con validacion TLS
+      ansible.builtin.command:
+        argv:
+          - curl
+          - --fail
+          - --location
+          - --silent
+          - --show-error
+          - --output
+          - "{{ mongodb_tools_download_path }}"
+          - "{{ mongodb_tools_download_url }}"
+      changed_when: true
+
+    - name: Verificar archivo descargado
+      ansible.builtin.stat:
+        path: "{{ mongodb_tools_download_path }}"
+      register: mongodb_tools_download
+
+    - name: Validar archivo descargado
+      ansible.builtin.assert:
+        that:
+          - mongodb_tools_download.stat.exists
+          - mongodb_tools_download.stat.isreg
+          - mongodb_tools_download.stat.size | int > 0
+        fail_msg: "[ERROR] No se pudo descargar MongoDB Database Tools"
+        success_msg: "[OK] Archivo descargado correctamente"
+
+    # ============================================================
+    # EXTRACCION
+    # ============================================================
+
+    - name: Extraer MongoDB Database Tools
+      ansible.builtin.unarchive:
+        src: "{{ mongodb_tools_download_path }}"
+        dest: "{{ mongodb_tools_extract_dir }}"
+        remote_src: true
+
+    - name: Buscar directorio bin extraido
+      ansible.builtin.shell: |
+        find "{{ mongodb_tools_extract_dir }}" \
+          -type d \
+          -name bin \
+          | head -n1
+      register: extracted_bin
+      changed_when: false
+
+    - name: Validar directorio bin encontrado
+      ansible.builtin.assert:
+        that:
+          - extracted_bin.stdout | length > 0
+        fail_msg: "[ERROR] No se encontro el directorio bin de MongoDB Database Tools"
+        success_msg: "[OK] Directorio bin encontrado"
+
+    - name: Crear directorio bin definitivo
+      ansible.builtin.file:
+        path: "{{ mongodb_tools_install_dir }}/bin"
+        state: directory
+        mode: "0755"
+
+    - name: Copiar binarios al directorio versionado
+      ansible.builtin.copy:
+        src: "{{ extracted_bin.stdout }}/"
+        dest: "{{ mongodb_tools_install_dir }}/bin/"
+        remote_src: true
+        mode: preserve
+
+    # ============================================================
+    # VALIDACION DE VERSION
+    # ============================================================
+
+    - name: Obtener version de mongodump
+      ansible.builtin.command:
+        cmd: "{{ mongodb_tools_install_dir }}/bin/mongodump --version"
+      register: mongodump_version
+      changed_when: false
+
+    - name: Obtener version de mongorestore
+      ansible.builtin.command:
+        cmd: "{{ mongodb_tools_install_dir }}/bin/mongorestore --version"
+      register: mongorestore_version
+      changed_when: false
+
+    - name: Validar version de mongodump
+      ansible.builtin.assert:
+        that:
+          - "'mongodump version: ' ~ mongodb_tools_version in mongodump_version.stdout"
+        fail_msg: >-
+          [ERROR] Version incorrecta de mongodump.
+          Esperada: {{ mongodb_tools_version }}
+        success_msg: >-
+          [OK] mongodump {{ mongodb_tools_version }} validado
+
+    - name: Validar version de mongorestore
+      ansible.builtin.assert:
+        that:
+          - "'mongorestore version: ' ~ mongodb_tools_version in mongorestore_version.stdout"
+        fail_msg: >-
+          [ERROR] Version incorrecta de mongorestore.
+          Esperada: {{ mongodb_tools_version }}
+        success_msg: >-
+          [OK] mongorestore {{ mongodb_tools_version }} validado
+
+    # ============================================================
+    # LIMPIEZA TEMPORAL
+    # ============================================================
+
+    - name: Eliminar archivo temporal descargado
+      ansible.builtin.file:
+        path: "{{ mongodb_tools_download_path }}"
+        state: absent
+
+    - name: Eliminar directorio temporal
+      ansible.builtin.file:
+        path: "{{ mongodb_tools_extract_dir }}"
+        state: absent
+
+    # ============================================================
+    # RESULTADO
+    # ============================================================
+
+    - name: Resultado final
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "MONGODB DATABASE TOOLS CONFIGURADAS"
+          - "============================================================"
+          - "Ambiente: {{ environment_name }}"
+          - "Plataforma: {{ mongodb_tools_platform }}"
+          - "Arquitectura: {{ mongodb_tools_arch }}"
+          - "Version: {{ mongodb_tools_version }}"
+          - "mongodump: {{ mongodb_tools_install_dir }}/bin/mongodump"
+          - "mongorestore: {{ mongodb_tools_install_dir }}/bin/mongorestore"
+          - "Estado: OK"
+          - "============================================================"
