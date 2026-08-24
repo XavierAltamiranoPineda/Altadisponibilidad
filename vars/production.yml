@@ -17,6 +17,9 @@ mongo_backup_network: "{{ production_mongo_backup_network }}"
 # Imagen Docker dedicada para las herramientas de respaldo
 mongo_backup_tools_image: "{{ production_mongo_backup_tools_image | default('mongo-backup-tools:100.18.0') }}"
 
+# Imagen base del contenedor para Database Tools en produccion
+mongodb_tools_container_base_image: "{{ production_mongodb_tools_container_base_image | default('ubuntu:24.04') }}"
+
 # Servicios MongoDB para trazabilidad en produccion
 mongo_trace_services: "{{ production_mongo_trace_services }}"
 
@@ -29,6 +32,9 @@ backup_root: "{{ production_backup_repository }}"
 
 # Ruta de logs
 backup_log_root: "{{ production_backup_log_root }}"
+
+# Ruta del archivo de password de Vault para ejecucion no interactiva (Cron)
+ansible_vault_password_file: "{{ production_ansible_vault_password_file }}"
 
 # La herramienta definitiva sera definida institucionalmente
 backup_scheduler: "{{ production_backup_scheduler | default('cron') }}"

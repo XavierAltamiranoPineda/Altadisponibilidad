@@ -19,6 +19,9 @@ mongo_backup_network: "mongo_swarm_net"
 # Imagen Docker dedicada para las herramientas de respaldo
 mongo_backup_tools_image: "mongo-backup-tools:100.18.0"
 
+# Imagen base del contenedor alineada con la plataforma de Database Tools
+mongodb_tools_container_base_image: "ubuntu:26.04"
+
 # Servicios MongoDB usados exclusivamente para la deteccion de trazabilidad
 mongo_trace_services:
   - "mongo1"
@@ -34,6 +37,9 @@ backup_root: "{{ playbook_dir }}/../../backups/mongodb"
 
 # Directorio local de logs
 backup_log_root: "{{ playbook_dir }}/../../logs"
+
+# Ruta del archivo de password de Vault para ejecucion no interactiva (Cron)
+ansible_vault_password_file: "{{ playbook_dir }}/../../secrets/vault_password"
 
 # Automatizacion local
 backup_scheduler: "cron"

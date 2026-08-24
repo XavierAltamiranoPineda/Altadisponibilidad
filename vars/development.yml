@@ -17,6 +17,9 @@ mongo_backup_network: "{{ development_mongo_backup_network }}"
 # Imagen Docker dedicada para las herramientas de respaldo
 mongo_backup_tools_image: "{{ development_mongo_backup_tools_image | default('mongo-backup-tools:100.18.0') }}"
 
+# Imagen base del contenedor para Database Tools en desarrollo
+mongodb_tools_container_base_image: "{{ development_mongodb_tools_container_base_image | default('ubuntu:24.04') }}"
+
 # Servicios MongoDB para trazabilidad en desarrollo
 mongo_trace_services: "{{ development_mongo_trace_services }}"
 
@@ -29,6 +32,9 @@ backup_root: "{{ development_backup_repository }}"
 
 # Ruta de logs
 backup_log_root: "{{ development_backup_log_root }}"
+
+# Ruta del archivo de password de Vault para ejecucion no interactiva (Cron)
+ansible_vault_password_file: "{{ development_ansible_vault_password_file }}"
 
 # Puede ser cron, Jenkins, Rundeck u otra herramienta institucional
 backup_scheduler: "{{ development_backup_scheduler | default('cron') }}"

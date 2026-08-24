@@ -6,6 +6,12 @@
 # mongodump/mongorestore en contenedores temporales
 # dentro de la red overlay Swarm (mongo_backup_network).
 #
+# Construccion offline y reproducible:
+#   - Utiliza como contexto la raiz del proyecto para copiar los
+#     binarios ya versionados en tools/mongodb-database-tools/<version>/bin
+#   - Parametriza BASE_IMAGE segun mongodb_tools_container_base_image
+#     para asegurar compatibilidad de plataforma y librerias
+#
 # Soporte multiambiente:
 #   LOCAL (default):
 #     ansible-playbook playbooks/backup/backup_tools_image_setup.yml
@@ -25,7 +31,8 @@
 
   vars:
     target_environment: "local"
-    dockerfile_dir: "{{ playbook_dir }}/../../docker/mongodb-tools"
+    project_root: "{{ playbook_dir }}/../.."
+    dockerfile_path: "{{ project_root }}/docker/mongodb-tools/Dockerfile"
 
   tasks:
 
@@ -41,35 +48,112 @@
     # VALIDACIONES DE CONFIGURACION
     # ============================================================
 
-    - name: Validar variables de imagen y version requeridas
+    - name: Validar variables de imagen, base y version requeridas
       ansible.builtin.assert:
         that:
           - mongo_backup_tools_image is defined
           - mongo_backup_tools_image | length > 0
           - mongodb_tools_version is defined
           - mongodb_tools_version | length > 0
-        fail_msg: "[ERROR] Variables de imagen o version de Database Tools no definidas en {{ target_environment }}"
-        success_msg: "[OK] Variables de imagen validadas para {{ environment_name }}"
+          - mongodb_tools_root is defined
+          - mongodb_tools_root | length > 0
+          - mongodb_tools_container_base_image is defined
+          - mongodb_tools_container_base_image | length > 0
+        fail_msg: >-
+          [ERROR] Variables de imagen, imagen base o version de Database Tools
+          no definidas en {{ target_environment }}
+        success_msg: >-
+          [OK] Variables validadas para {{ environment_name }}:
+          imagen={{ mongo_backup_tools_image }},
+          base={{ mongodb_tools_container_base_image }},
+          version={{ mongodb_tools_version }}
 
     - name: Verificar existencia de Dockerfile
       ansible.builtin.stat:
-        path: "{{ dockerfile_dir }}/Dockerfile"
+        path: "{{ dockerfile_path }}"
       register: dockerfile_stat
 
     - name: Validar Dockerfile presente
       ansible.builtin.assert:
         that:
           - dockerfile_stat.stat.exists
-        fail_msg: "[ERROR] No se encontro Dockerfile en {{ dockerfile_dir }}"
+        fail_msg: "[ERROR] No se encontro Dockerfile en {{ dockerfile_path }}"
         success_msg: "[OK] Dockerfile localizado correctamente"
 
     # ============================================================
-    # CONSTRUCCION DE LA IMAGEN
+    # VALIDACION DE BINARIOS EN EL HOST ANTES DEL BUILD
     # ============================================================
 
-    - name: Construir imagen Docker mongo-backup-tools
+    - name: Verificar existencia fisica de mongodump en el host
+      ansible.builtin.stat:
+        path: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongodump"
+      register: host_mongodump_stat
+
+    - name: Verificar existencia fisica de mongorestore en el host
+      ansible.builtin.stat:
+        path: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongorestore"
+      register: host_mongorestore_stat
+
+    - name: Validar que los binarios existan en el host antes de construir la imagen
+      ansible.builtin.assert:
+        that:
+          - host_mongodump_stat.stat.exists
+          - host_mongodump_stat.stat.isreg
+          - host_mongorestore_stat.stat.exists
+          - host_mongorestore_stat.stat.isreg
+        fail_msg: >-
+          [ERROR] No se encontraron los binarios de Database Tools en
+          {{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin.
+          Ejecute primero: ansible-playbook playbooks/backup/backup_tools_setup.yml
+        success_msg: "[OK] Binarios mongodump y mongorestore validados en el host"
+
+    # ============================================================
+    # VALIDACION DE VERSIONES EN EL HOST
+    # ============================================================
+
+    - name: Verificar version de mongodump en el host
       ansible.builtin.command:
-        cmd: "docker build -t {{ mongo_backup_tools_image }} --build-arg TOOLS_VERSION={{ mongodb_tools_version }} {{ dockerfile_dir }}"
+        cmd: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongodump --version"
+      register: host_mongodump_version
+      changed_when: false
+
+    - name: Verificar version de mongorestore en el host
+      ansible.builtin.command:
+        cmd: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongorestore --version"
+      register: host_mongorestore_version
+      changed_when: false
+
+    - name: Validar version 100.18.0 de mongodump en el host
+      ansible.builtin.assert:
+        that:
+          - "'mongodump version: ' ~ mongodb_tools_version in host_mongodump_version.stdout"
+        fail_msg: >-
+          [ERROR] Version incorrecta de mongodump en el host.
+          Esperada: {{ mongodb_tools_version }}
+        success_msg: "[OK] mongodump {{ mongodb_tools_version }} validado en el host"
+
+    - name: Validar version 100.18.0 de mongorestore en el host
+      ansible.builtin.assert:
+        that:
+          - "'mongorestore version: ' ~ mongodb_tools_version in host_mongorestore_version.stdout"
+        fail_msg: >-
+          [ERROR] Version incorrecta de mongorestore en el host.
+          Esperada: {{ mongodb_tools_version }}
+        success_msg: "[OK] mongorestore {{ mongodb_tools_version }} validado en el host"
+
+    # ============================================================
+    # CONSTRUCCION DE LA IMAGEN (BUILD CONTEXT: RAIZ DEL PROYECTO)
+    # ============================================================
+
+    - name: Construir imagen Docker mongo-backup-tools usando binarios locales
+      ansible.builtin.command:
+        cmd: >-
+          docker build
+          -f {{ dockerfile_path }}
+          -t {{ mongo_backup_tools_image }}
+          --build-arg BASE_IMAGE={{ mongodb_tools_container_base_image }}
+          --build-arg TOOLS_VERSION={{ mongodb_tools_version }}
+          {{ project_root }}
       register: build_result
       changed_when: true
 
@@ -80,17 +164,32 @@
     - name: Verificar la version de mongodump dentro de la imagen
       ansible.builtin.command:
         cmd: "docker run --rm {{ mongo_backup_tools_image }} mongodump --version"
-      register: container_tools_version
+      register: container_mongodump_version
       changed_when: false
 
-    - name: Validar version exacta en el contenedor
+    - name: Verificar la version de mongorestore dentro de la imagen
+      ansible.builtin.command:
+        cmd: "docker run --rm {{ mongo_backup_tools_image }} mongorestore --version"
+      register: container_mongorestore_version
+      changed_when: false
+
+    - name: Validar version exacta de mongodump en el contenedor
       ansible.builtin.assert:
         that:
-          - "'mongodump version: ' ~ mongodb_tools_version in container_tools_version.stdout"
+          - "'mongodump version: ' ~ mongodb_tools_version in container_mongodump_version.stdout"
         fail_msg: >-
-          [ERROR] La imagen construida no contiene la version esperada de Database Tools.
+          [ERROR] La imagen construida no contiene la version esperada de mongodump o fallo por incompatibilidad de plataforma.
           Esperada: {{ mongodb_tools_version }}
-        success_msg: "[OK] Imagen {{ mongo_backup_tools_image }} validada con Database Tools {{ mongodb_tools_version }}"
+        success_msg: "[OK] mongodump {{ mongodb_tools_version }} validado en el contenedor"
+
+    - name: Validar version exacta de mongorestore en el contenedor
+      ansible.builtin.assert:
+        that:
+          - "'mongorestore version: ' ~ mongodb_tools_version in container_mongorestore_version.stdout"
+        fail_msg: >-
+          [ERROR] La imagen construida no contiene la version esperada de mongorestore o fallo por incompatibilidad de plataforma.
+          Esperada: {{ mongodb_tools_version }}
+        success_msg: "[OK] mongorestore {{ mongodb_tools_version }} validado en el contenedor"
 
     # ============================================================
     # RESULTADO
@@ -104,6 +203,8 @@
           - "============================================================"
           - "Ambiente: {{ environment_name }}"
           - "Imagen: {{ mongo_backup_tools_image }}"
+          - "Base Image: {{ mongodb_tools_container_base_image }}"
           - "Database Tools: {{ mongodb_tools_version }}"
+          - "Origen de binarios: {{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin"
           - "Estado: LISTA PARA USAR EN BACKUPS TEMPORALES"
           - "============================================================"

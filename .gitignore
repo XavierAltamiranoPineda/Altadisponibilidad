@@ -1,6 +1,8 @@
 # Ansible Vault and Secrets
 vars/vault_mongodb.yml
 secrets/mongo-keyfile
+secrets/vault_password
+secrets/
 .vault_pass
 
 # Ansible retry files
