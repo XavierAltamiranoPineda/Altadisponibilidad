@@ -35,6 +35,20 @@
           Configurado: {{ backup_checksum_algorithm }}
         success_msg: "[OK] Algoritmo de checksum validado: {{ backup_checksum_algorithm }}"
 
+    - name: Validar politica minima de espacio libre
+      ansible.builtin.assert:
+        that:
+          - backup_min_free_percent is defined
+          - (backup_min_free_percent | string) is match('^[0-9]+([.][0-9]+)?$')
+          - backup_min_free_percent | float > 0
+          - backup_min_free_percent | float < 100
+        fail_msg: >-
+          [ERROR] backup_min_free_percent debe ser un valor numerico
+          mayor que 0 y menor que 100.
+        success_msg: >-
+          [OK] Politica minima de espacio libre validada:
+          {{ backup_min_free_percent }}%
+
     - name: Validar lista de servicios MongoDB para trazabilidad
       ansible.builtin.assert:
         that:
@@ -118,6 +132,12 @@
         backup_filename: "{{ mongo_database }}_{{ backup_timestamp }}{{ backup_extension }}"
         backup_container_name: "mongo_backup_runner_{{ backup_datetime.stdout.split('|')[0] }}"
 
+    - name: Garantizar directorio raiz de respaldos en el host con permisos 0700
+      ansible.builtin.file:
+        path: "{{ backup_root }}"
+        state: directory
+        mode: "0700"
+
     - name: Crear directorio mensual de respaldo en el host con permisos 0700
       ansible.builtin.file:
         path: "{{ backup_directory }}"
@@ -129,6 +149,60 @@
         path: "{{ backup_log_root }}"
         state: directory
         mode: "0700"
+
+    # ============================================================
+    # VALIDACION DE ALMACENAMIENTO Y ESPACIO DISPONIBLE
+    # ============================================================
+    # Comprueba la capacidad del filesystem donde reside backup_root.
+    # Si no cumple el umbral minimo (backup_min_free_percent), aborta
+    # antes de ejecutar mongodump para evitar fallos por disco lleno
+    # o respaldos parciales corruptos.
+
+    - name: Consultar capacidad del filesystem del repositorio de respaldos
+      ansible.builtin.command:
+        argv:
+          - df
+          - -Pk
+          - "{{ backup_root }}"
+      register: df_backup_root
+      changed_when: false
+      failed_when: false
+
+    - name: Validar salida estructurada del comando df
+      ansible.builtin.assert:
+        that:
+          - df_backup_root.rc == 0
+          - df_backup_root.stdout_lines | length >= 2
+          - df_backup_root.stdout_lines[-1].split() | length >= 6
+        fail_msg: "[ERROR] No se pudo obtener informacion valida del filesystem con 'df -Pk {{ backup_root }}'."
+        success_msg: "[OK] Salida de filesystem obtenida correctamente"
+
+    - name: Extraer valores numericos de bloques del filesystem
+      ansible.builtin.set_fact:
+        backup_filesystem_total_kb: "{{ df_backup_root.stdout_lines[-1].split()[1] | int }}"
+        backup_filesystem_avail_kb: "{{ df_backup_root.stdout_lines[-1].split()[3] | int }}"
+
+    - name: Validar que el total del filesystem sea mayor a cero
+      ansible.builtin.assert:
+        that:
+          - backup_filesystem_total_kb | int > 0
+        fail_msg: "[ERROR] La capacidad total del filesystem reportada es 0 bloques. Imposible calcular espacio libre."
+        success_msg: "[OK] Capacidad total del filesystem: {{ backup_filesystem_total_kb }} KiB"
+
+    - name: Calcular porcentaje de espacio libre disponible
+      ansible.builtin.set_fact:
+        backup_free_percent: "{{ (((backup_filesystem_avail_kb | float) * 100.0) / (backup_filesystem_total_kb | float)) | round(2) }}"
+
+    - name: Validar espacio suficiente en el filesystem de respaldos
+      ansible.builtin.assert:
+        that:
+          - backup_free_percent | float >= backup_min_free_percent | float
+        fail_msg: >-
+          [ERROR] Espacio insuficiente para ejecutar el respaldo.
+          Disponible: {{ backup_free_percent }}%
+          Minimo requerido: {{ backup_min_free_percent }}%
+          Repositorio: {{ backup_root }}
+        success_msg: "[OK] Espacio disponible para respaldo: {{ backup_free_percent }}% (Minimo requerido: {{ backup_min_free_percent }}%)"
 
     # ============================================================
     # TRAZABILIDAD DEL REPLICA SET (INFORMATIVO / LOGS)
@@ -181,10 +255,11 @@
         fail_msg: "[ERROR] No se pudo detectar un PRIMARY activo"
         success_msg: "[OK] PRIMARY disponible para trazabilidad"
 
-    - name: Mostrar informacion de conexion HA y usuario de ejecucion
+    - name: Mostrar informacion de conexion HA, espacio y usuario de ejecucion
       ansible.builtin.debug:
         msg:
           - "[OK] PRIMARY detectado (trazabilidad): {{ mongo_primary.stdout }}"
+          - "[OK] Espacio libre previo: {{ backup_free_percent }}% (Minimo: {{ backup_min_free_percent }}%)"
           - "[OK] Servicios evaluados trazabilidad: {{ mongo_trace_services | join(', ') }}"
           - "[OK] Usuario Host ejecutor: UID={{ backup_host_uid.stdout }} GID={{ backup_host_gid.stdout }}"
           - "[OK] Red Overlay: {{ mongo_backup_network }}"
@@ -305,6 +380,7 @@
           | file={{ backup_filename }}
           | size={{ backup_file.stat.size }}
           | checksum=OK
+          | free_space_percent_before={{ backup_free_percent }}
           | result=SUCCESS
 
     # ============================================================
@@ -320,6 +396,7 @@
           - "Ambiente: {{ environment_name }}"
           - "Base: {{ mongo_database }}"
           - "PRIMARY (trazabilidad): {{ mongo_primary.stdout }}"
+          - "Espacio libre previo: {{ backup_free_percent }}% (Minimo: {{ backup_min_free_percent }}%)"
           - "Usuario Host ejecutor: UID={{ backup_host_uid.stdout }} GID={{ backup_host_gid.stdout }}"
           - "Red Overlay: {{ mongo_backup_network }}"
           - "URI Backup HA: {{ mongo_backup_uri }}"

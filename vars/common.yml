@@ -18,10 +18,16 @@ backup_monthly_retention_months: 12
 backup_schedule_hour: "02"
 backup_schedule_minute: "00"
 
+# Decision de implementacion.
+# Porcentaje minimo de espacio libre requerido antes de iniciar un backup.
+# Puede sobrescribirse por ambiente.
+backup_min_free_percent: 20
+
 backup_log_filename: "mongodb_backup.log"
 backup_retention_log_filename: "mongodb_retention.log"
 backup_lock_filename: "mongodb_backup.lock"
 backup_cron_log_filename: "mongodb_backup_cron.log"
+restore_evidence_log_filename: "mongodb_restore_evidence.log"
 
 # ============================================================
 # MONGODB DATABASE TOOLS
