@@ -8,16 +8,27 @@ environment_name: "production"
 # Estos valores deben ser definidos por infraestructura
 mongo_database: "{{ production_mongo_database }}"
 
-# Endpoint de conexion para backup en produccion
-mongo_backup_host: "{{ production_mongo_backup_host }}"
-mongo_backup_port: "{{ production_mongo_backup_port }}"
+# URI de conexion para respaldo en produccion con Replica Set (HA)
+mongo_backup_uri: "{{ production_mongo_backup_uri }}"
+
+# Red de contenedores o infraestructura en produccion
+mongo_backup_network: "{{ production_mongo_backup_network }}"
+
+# Imagen Docker dedicada para las herramientas de respaldo
+mongo_backup_tools_image: "{{ production_mongo_backup_tools_image | default('mongo-backup-tools:100.18.0') }}"
+
+# Servicios MongoDB para trazabilidad en produccion
+mongo_trace_services: "{{ production_mongo_trace_services }}"
 
 # Plataforma de herramientas para produccion
 mongodb_tools_platform: "{{ production_mongodb_tools_platform | default('ubuntu2404') }}"
 mongodb_tools_arch: "{{ production_mongodb_tools_arch | default('x86_64') }}"
 
+# Ruta de respaldo para produccion
 backup_root: "{{ production_backup_repository }}"
+
+# Ruta de logs
 backup_log_root: "{{ production_backup_log_root }}"
 
 # La herramienta definitiva sera definida institucionalmente
-backup_scheduler: "{{ production_backup_scheduler }}"
+backup_scheduler: "{{ production_backup_scheduler | default('cron') }}"

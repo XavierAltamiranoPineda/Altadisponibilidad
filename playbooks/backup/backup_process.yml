@@ -1,0 +1,21 @@
+---
+# ============================================================
+# ORQUESTRADOR DEL PROCESO DE RESPALDO MONGODB
+# ============================================================
+# Punto unico de ejecucion del proceso normal de respaldo.
+# Orquesta de forma secuencial y dependiente:
+#   1. Generacion del respaldo (backup_run.yml)
+#   2. Validacion de integridad y checksum (backup_validate.yml)
+#   3. Aplicacion de politica de retencion (backup_retention.yml)
+#
+# Propagacion de ambiente:
+#   Cada playbook hijo cargara por defecto 'local'.
+#   Se puede sobreescribir para todo el proceso desde linea de comandos:
+#     ansible-playbook playbooks/backup/backup_process.yml
+#     ansible-playbook playbooks/backup/backup_process.yml -e target_environment=development
+#     ansible-playbook playbooks/backup/backup_process.yml -e target_environment=production
+# ============================================================
+
+- import_playbook: backup_run.yml
+- import_playbook: backup_validate.yml
+- import_playbook: backup_retention.yml

@@ -8,9 +8,22 @@ environment_name: "local"
 # Base utilizada por las pruebas de Fase 1
 mongo_database: "prueba_ha"
 
-# Endpoint de conexion para backup local
-mongo_backup_host: "127.0.0.1"
-mongo_backup_port: 27017
+# URI de conexion para respaldo con alta disponibilidad (Replica Set)
+# Conecta a la red overlay mongo_swarm_net con descubrimiento de rs0
+# Sin credenciales (las credenciales se leen desde vars/vault_mongodb.yml)
+mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0"
+
+# Red overlay de Docker Swarm a la que se conecta el contenedor temporal
+mongo_backup_network: "mongo_swarm_net"
+
+# Imagen Docker dedicada para las herramientas de respaldo
+mongo_backup_tools_image: "mongo-backup-tools:100.18.0"
+
+# Servicios MongoDB usados exclusivamente para la deteccion de trazabilidad
+mongo_trace_services:
+  - "mongo1"
+  - "mongo2"
+  - "mongo3"
 
 # Plataforma de herramientas para ambiente local
 mongodb_tools_platform: "ubuntu2604"

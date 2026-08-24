@@ -19,6 +19,7 @@ backup_schedule_hour: "02"
 backup_schedule_minute: "00"
 
 backup_log_filename: "mongodb_backup.log"
+backup_retention_log_filename: "mongodb_retention.log"
 
 # ============================================================
 # MONGODB DATABASE TOOLS

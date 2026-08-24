@@ -1,0 +1,109 @@
+---
+# ============================================================
+# CONSTRUCCION DE LA IMAGEN DOCKER DE MONGODB DATABASE TOOLS
+# ============================================================
+# Construye la imagen local dedicada para ejecutar
+# mongodump/mongorestore en contenedores temporales
+# dentro de la red overlay Swarm (mongo_backup_network).
+#
+# Soporte multiambiente:
+#   LOCAL (default):
+#     ansible-playbook playbooks/backup/backup_tools_image_setup.yml
+#   DESARROLLO:
+#     ansible-playbook playbooks/backup/backup_tools_image_setup.yml -e target_environment=development
+#   PRODUCCION:
+#     ansible-playbook playbooks/backup/backup_tools_image_setup.yml -e target_environment=production
+# ============================================================
+
+- name: Preparar imagen Docker de MongoDB Database Tools
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+
+  vars:
+    target_environment: "local"
+    dockerfile_dir: "{{ playbook_dir }}/../../docker/mongodb-tools"
+
+  tasks:
+
+    # ============================================================
+    # CARGA DE VARIABLES DEL AMBIENTE
+    # ============================================================
+
+    - name: "Cargar variables del ambiente: {{ target_environment }}"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../vars/{{ target_environment }}.yml"
+
+    # ============================================================
+    # VALIDACIONES DE CONFIGURACION
+    # ============================================================
+
+    - name: Validar variables de imagen y version requeridas
+      ansible.builtin.assert:
+        that:
+          - mongo_backup_tools_image is defined
+          - mongo_backup_tools_image | length > 0
+          - mongodb_tools_version is defined
+          - mongodb_tools_version | length > 0
+        fail_msg: "[ERROR] Variables de imagen o version de Database Tools no definidas en {{ target_environment }}"
+        success_msg: "[OK] Variables de imagen validadas para {{ environment_name }}"
+
+    - name: Verificar existencia de Dockerfile
+      ansible.builtin.stat:
+        path: "{{ dockerfile_dir }}/Dockerfile"
+      register: dockerfile_stat
+
+    - name: Validar Dockerfile presente
+      ansible.builtin.assert:
+        that:
+          - dockerfile_stat.stat.exists
+        fail_msg: "[ERROR] No se encontro Dockerfile en {{ dockerfile_dir }}"
+        success_msg: "[OK] Dockerfile localizado correctamente"
+
+    # ============================================================
+    # CONSTRUCCION DE LA IMAGEN
+    # ============================================================
+
+    - name: Construir imagen Docker mongo-backup-tools
+      ansible.builtin.command:
+        cmd: "docker build -t {{ mongo_backup_tools_image }} --build-arg TOOLS_VERSION={{ mongodb_tools_version }} {{ dockerfile_dir }}"
+      register: build_result
+      changed_when: true
+
+    # ============================================================
+    # VALIDACION DE LA IMAGEN GENERADA
+    # ============================================================
+
+    - name: Verificar la version de mongodump dentro de la imagen
+      ansible.builtin.command:
+        cmd: "docker run --rm {{ mongo_backup_tools_image }} mongodump --version"
+      register: container_tools_version
+      changed_when: false
+
+    - name: Validar version exacta en el contenedor
+      ansible.builtin.assert:
+        that:
+          - "'mongodump version: ' ~ mongodb_tools_version in container_tools_version.stdout"
+        fail_msg: >-
+          [ERROR] La imagen construida no contiene la version esperada de Database Tools.
+          Esperada: {{ mongodb_tools_version }}
+        success_msg: "[OK] Imagen {{ mongo_backup_tools_image }} validada con Database Tools {{ mongodb_tools_version }}"
+
+    # ============================================================
+    # RESULTADO
+    # ============================================================
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "IMAGEN MONGODB TOOLS CONSTRUIDA EXITOSAMENTE"
+          - "============================================================"
+          - "Ambiente: {{ environment_name }}"
+          - "Imagen: {{ mongo_backup_tools_image }}"
+          - "Database Tools: {{ mongodb_tools_version }}"
+          - "Estado: LISTA PARA USAR EN BACKUPS TEMPORALES"
+          - "============================================================"

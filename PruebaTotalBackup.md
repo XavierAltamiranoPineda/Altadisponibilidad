@@ -2,6 +2,13 @@
 # FASE 2 - BACKUP Y RESTORE DE MONGODB
 # ============================================================
 
+# ============================================================
+# 0. VERIFICAR VERSIONAMIENTO
+# ============================================================
+
+./tools/mongodb-database-tools/100.18.0/bin/mongodump --version
+
+./tools/mongodb-database-tools/100.18.0/bin/mongorestore --version
 
 # ============================================================
 # 1. PREPARAR ANSIBLE VAULT
@@ -132,3 +139,9 @@ ansible-playbook playbooks/tests/cleanup_test_data.yml --ask-vault-pass
 # ============================================================
 
 ansible-playbook playbooks/tests/reset_local_environment.yml
+
+# ============================================================
+# 14. BORRAR SOLO LOS ARCHIVOS DE BACKUP
+# ============================================================
+
+ansible-playbook playbooks/backup/cleanup_backup_files.yml

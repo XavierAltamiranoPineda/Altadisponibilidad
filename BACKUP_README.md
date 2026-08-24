@@ -238,7 +238,6 @@ mongo_restore_user: "restore_user"
 mongo_restore_password: "[PASSWORD]"
 ```
 
-> ⚠️ Nunca deben almacenarse contraseñas reales en archivos versionados en Git.
 
 ---
 

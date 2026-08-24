@@ -6,13 +6,99 @@
 
   vars_files:
     - "{{ playbook_dir }}/../../vars/common.yml"
-    - "{{ playbook_dir }}/../../vars/local.yml"
     - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    target_environment: "local"
 
   tasks:
 
     # ============================================================
-    # FECHA, NOMBRE Y RUTAS
+    # CARGA DE VARIABLES DEL AMBIENTE
+    # ============================================================
+
+    - name: "Cargar variables del ambiente: {{ target_environment }}"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../vars/{{ target_environment }}.yml"
+
+    # ============================================================
+    # VALIDACION DE CONFIGURACION Y DOCKER
+    # ============================================================
+
+    - name: Validar algoritmo de checksum configurado
+      ansible.builtin.assert:
+        that:
+          - backup_checksum_algorithm == "sha256"
+        fail_msg: >-
+          [ERROR] Algoritmo de checksum no soportado.
+          Esperado: sha256
+          Configurado: {{ backup_checksum_algorithm }}
+        success_msg: "[OK] Algoritmo de checksum validado: {{ backup_checksum_algorithm }}"
+
+    - name: Validar lista de servicios MongoDB para trazabilidad
+      ansible.builtin.assert:
+        that:
+          - mongo_trace_services is defined
+          - mongo_trace_services | type_debug == "list"
+          - mongo_trace_services | length > 0
+          - mongo_trace_services | select('string') | list | length == mongo_trace_services | length
+        fail_msg: >-
+          [ERROR] mongo_trace_services debe ser una lista no vacia
+          de nombres de servicios MongoDB para el ambiente
+          {{ environment_name }}
+        success_msg: >-
+          [OK] Servicios para trazabilidad validados:
+          {{ mongo_trace_services | join(', ') }}
+
+    - name: Verificar si la imagen Docker de respaldos existe localmente
+      ansible.builtin.command:
+        cmd: "docker image inspect {{ mongo_backup_tools_image }}"
+      register: backup_tools_image_check
+      changed_when: false
+      failed_when: false
+
+    - name: Informar si la imagen Docker de respaldos debe construirse
+      ansible.builtin.assert:
+        that:
+          - backup_tools_image_check.rc == 0
+        fail_msg: >-
+          [ERROR] La imagen Docker {{ mongo_backup_tools_image }} no existe localmente.
+          Ejecute primero: ansible-playbook playbooks/backup/backup_tools_image_setup.yml
+        success_msg: "[OK] Imagen Docker de respaldos {{ mongo_backup_tools_image }} encontrada"
+
+    - name: Validar version 100.18.0 dentro de la imagen de respaldos
+      ansible.builtin.command:
+        cmd: "docker run --rm {{ mongo_backup_tools_image }} mongodump --version"
+      register: container_mongodump_version
+      changed_when: false
+
+    - name: Validar version exacta de Database Tools
+      ansible.builtin.assert:
+        that:
+          - "'mongodump version: ' ~ mongodb_tools_version in container_mongodump_version.stdout"
+        fail_msg: >-
+          [ERROR] Version incorrecta de Database Tools en la imagen Docker.
+          Esperada: {{ mongodb_tools_version }}
+        success_msg: "[OK] Database Tools {{ mongodb_tools_version }} validado en contenedor"
+
+    # ============================================================
+    # IDENTIFICACION DE USUARIO HOST (UID/GID)
+    # ============================================================
+
+    - name: Obtener UID del usuario host
+      ansible.builtin.command:
+        cmd: id -u
+      register: backup_host_uid
+      changed_when: false
+
+    - name: Obtener GID del usuario host
+      ansible.builtin.command:
+        cmd: id -g
+      register: backup_host_gid
+      changed_when: false
+
+    # ============================================================
+    # FECHA, NOMBRE Y RUTAS DEL HOST
     # ============================================================
 
     - name: Obtener fecha y hora del respaldo
@@ -26,50 +112,34 @@
         backup_timestamp: "{{ backup_datetime.stdout.split('|')[0] }}"
         backup_month: "{{ backup_datetime.stdout.split('|')[1] }}"
 
-    - name: Definir rutas del respaldo
+    - name: Definir rutas del respaldo en el host
       ansible.builtin.set_fact:
         backup_directory: "{{ backup_root }}/{{ mongo_database }}/{{ backup_month }}"
         backup_filename: "{{ mongo_database }}_{{ backup_timestamp }}{{ backup_extension }}"
+        backup_container_name: "mongo_backup_runner_{{ backup_datetime.stdout.split('|')[0] }}"
 
-    - name: Crear directorio mensual de respaldo
+    - name: Crear directorio mensual de respaldo en el host con permisos 0700
       ansible.builtin.file:
         path: "{{ backup_directory }}"
         state: directory
         mode: "0700"
 
-    - name: Crear directorio de bitacoras
+    - name: Crear directorio de bitacoras en el host con permisos 0700
       ansible.builtin.file:
         path: "{{ backup_log_root }}"
         state: directory
         mode: "0700"
 
     # ============================================================
-    # VALIDACION DE MONGODB DATABASE TOOLS
+    # TRAZABILIDAD DEL REPLICA SET (INFORMATIVO / LOGS)
     # ============================================================
+    # La busqueda itera sobre mongo_trace_services (definido por ambiente).
+    # Esta deteccion es exclusivamente para trazabilidad y logs.
+    # La conexion real del backup se realiza mediante mongo_backup_uri.
 
-    - name: Obtener version de mongodump instalada en el host
-      ansible.builtin.command:
-        cmd: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongodump --version"
-      register: mongodump_version
-      changed_when: false
-
-    - name: Validar version aprobada de mongodump
-      ansible.builtin.assert:
-        that:
-          - "'mongodump version: ' ~ mongodb_tools_version in mongodump_version.stdout"
-        fail_msg: >-
-          [ERROR] Version incorrecta de mongodump.
-          Esperada: {{ mongodb_tools_version }}
-        success_msg: >-
-          [OK] mongodump {{ mongodb_tools_version }} validado
-
-    # ============================================================
-    # VALIDACION DEL REPLICA SET
-    # ============================================================
-
-    - name: Buscar un nodo MongoDB activo
+    - name: Buscar un nodo MongoDB activo para trazabilidad
       ansible.builtin.shell: |
-        for service in mongo1 mongo2 mongo3; do
+        for service in {{ mongo_trace_services | map('quote') | join(' ') }}; do
           container=$(docker ps \
             --filter "label=com.docker.swarm.service.name=${service}" \
             --format '{{"{{"}}.ID{{"}}"}}' | head -n1)
@@ -83,7 +153,7 @@
       register: mongo_available_container
       changed_when: false
 
-    - name: Detectar PRIMARY actual
+    - name: Detectar PRIMARY actual para trazabilidad
       ansible.builtin.shell: |
         docker exec \
           -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
@@ -103,73 +173,104 @@
       changed_when: false
       no_log: true
 
-    - name: Validar PRIMARY disponible
+    - name: Validar PRIMARY disponible para trazabilidad
       ansible.builtin.assert:
         that:
           - mongo_primary.stdout | length > 0
           - "':' in mongo_primary.stdout"
         fail_msg: "[ERROR] No se pudo detectar un PRIMARY activo"
-        success_msg: "[OK] PRIMARY disponible"
+        success_msg: "[OK] PRIMARY disponible para trazabilidad"
 
-    - name: Mostrar informacion de conexion y nodo PRIMARY
+    - name: Mostrar informacion de conexion HA y usuario de ejecucion
       ansible.builtin.debug:
         msg:
-          - "[OK] PRIMARY detectado: {{ mongo_primary.stdout }}"
-          - "[OK] Endpoint Backup Host: {{ mongo_backup_host }}:{{ mongo_backup_port }}"
+          - "[OK] PRIMARY detectado (trazabilidad): {{ mongo_primary.stdout }}"
+          - "[OK] Servicios evaluados trazabilidad: {{ mongo_trace_services | join(', ') }}"
+          - "[OK] Usuario Host ejecutor: UID={{ backup_host_uid.stdout }} GID={{ backup_host_gid.stdout }}"
+          - "[OK] Red Overlay: {{ mongo_backup_network }}"
+          - "[OK] URI Backup HA: {{ mongo_backup_uri }}"
+          - "[OK] Contenedor Temporal: {{ backup_container_name }}"
           - "[OK] Database Tools aprobadas: {{ mongodb_tools_version }}"
 
     # ============================================================
-    # EJECUCION DEL BACKUP
+    # EJECUCION DEL BACKUP CON CONTENEDOR TEMPORAL HA
+    # ============================================================
+    # El contenedor temporal:
+    #   1. Se ejecuta con UID:GID del host para no crear archivos como root
+    #   2. Se conecta a la red overlay Swarm (mongo_backup_network)
+    #   3. Resuelve las semillas indicadas en mongo_backup_uri
+    #   4. Monta {{ backup_directory }} en /backup dentro del contenedor
+    #   5. Ejecuta mongodump generando /backup/{{ backup_filename }}
+    #   6. Se destruye en la clausula 'always' garantizando limpieza absoluta
     # ============================================================
 
-    - name: Ejecutar mongodump desde el host
-      ansible.builtin.command:
-        argv:
-          - "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongodump"
-          - --host
-          - "{{ mongo_backup_host }}"
-          - --port
-          - "{{ mongo_backup_port | string }}"
-          - --username
-          - "{{ mongo_backup_user }}"
-          - --password
-          - "{{ mongo_backup_password }}"
-          - --authenticationDatabase
-          - "admin"
-          - --db
-          - "{{ mongo_database }}"
-          - --gzip
-          - "--archive={{ backup_directory }}/{{ backup_filename }}"
-      register: mongodump_result
-      changed_when: true
-      no_log: true
+    - name: Ejecutar respaldo con contenedor temporal y garantia de limpieza
+      block:
+        - name: Ejecutar mongodump dentro del contenedor temporal con UID/GID del host
+          ansible.builtin.command:
+            argv:
+              - docker
+              - run
+              - --name
+              - "{{ backup_container_name }}"
+              - --user
+              - "{{ backup_host_uid.stdout }}:{{ backup_host_gid.stdout }}"
+              - --network
+              - "{{ mongo_backup_network }}"
+              - -v
+              - "{{ backup_directory }}:/backup"
+              - "{{ mongo_backup_tools_image }}"
+              - mongodump
+              - "--uri={{ mongo_backup_uri }}"
+              - --username
+              - "{{ mongo_backup_user }}"
+              - --password
+              - "{{ mongo_backup_password }}"
+              - --authenticationDatabase
+              - "admin"
+              - --db
+              - "{{ mongo_database }}"
+              - --gzip
+              - "--archive=/backup/{{ backup_filename }}"
+          register: mongodump_result
+          changed_when: true
+          no_log: true
+
+      always:
+        - name: Limpiar y eliminar contenedor temporal de respaldo
+          ansible.builtin.command:
+            cmd: "docker rm -f {{ backup_container_name }}"
+          register: container_cleanup
+          changed_when: false
+          failed_when: false
+          no_log: true
 
     # ============================================================
-    # VALIDACION DEL ARCHIVO GENERADO
+    # VALIDACION DEL ARCHIVO GENERADO EN EL HOST Y CHECKSUM
     # ============================================================
 
-    - name: Obtener informacion del archivo generado
+    - name: Obtener informacion del archivo generado en el host
       ansible.builtin.stat:
         path: "{{ backup_directory }}/{{ backup_filename }}"
         checksum_algorithm: sha256
       register: backup_file
 
-    - name: Validar existencia y tamaño del respaldo
+    - name: Validar existencia y tamaño del respaldo en el host
       ansible.builtin.assert:
         that:
           - backup_file.stat.exists
           - backup_file.stat.isreg
           - backup_file.stat.size | int > 0
         fail_msg: "[ERROR] El archivo de respaldo no fue generado correctamente"
-        success_msg: "[OK] Archivo de respaldo generado correctamente"
+        success_msg: "[OK] Archivo de respaldo generado correctamente en el host"
 
-    - name: Generar archivo SHA-256
+    - name: Generar archivo SHA-256 en el host
       ansible.builtin.shell: |
         cd "{{ backup_directory }}"
         sha256sum "{{ backup_filename }}" > "{{ backup_filename }}.sha256"
       changed_when: true
 
-    - name: Validar checksum SHA-256
+    - name: Validar checksum SHA-256 en el host
       ansible.builtin.shell: |
         cd "{{ backup_directory }}"
         sha256sum -c "{{ backup_filename }}.sha256"
@@ -181,7 +282,7 @@
         that:
           - checksum_validation.rc == 0
         fail_msg: "[ERROR] Fallo la validacion SHA-256 del respaldo"
-        success_msg: "[OK] Integridad SHA-256 validada"
+        success_msg: "[OK] Integridad SHA-256 validada en el host"
 
     # ============================================================
     # BITACORA
@@ -198,7 +299,8 @@
           | environment={{ environment_name }}
           | database={{ mongo_database }}
           | primary={{ mongo_primary.stdout }}
-          | host={{ mongo_backup_host }}:{{ mongo_backup_port }}
+          | replica_set={{ mongo_replica_set }}
+          | network={{ mongo_backup_network }}
           | tools_version={{ mongodb_tools_version }}
           | file={{ backup_filename }}
           | size={{ backup_file.stat.size }}
@@ -209,19 +311,22 @@
     # RESULTADO
     # ============================================================
 
-    - name: Resultado final del respaldo
+    - name: Resultado final del respaldo HA
       ansible.builtin.debug:
         msg:
           - "============================================================"
-          - "BACKUP MONGODB GENERADO EXITOSAMENTE"
+          - "BACKUP MONGODB HA GENERADO EXITOSAMENTE"
           - "============================================================"
           - "Ambiente: {{ environment_name }}"
           - "Base: {{ mongo_database }}"
-          - "PRIMARY: {{ mongo_primary.stdout }}"
-          - "Host Backup: {{ mongo_backup_host }}:{{ mongo_backup_port }}"
+          - "PRIMARY (trazabilidad): {{ mongo_primary.stdout }}"
+          - "Usuario Host ejecutor: UID={{ backup_host_uid.stdout }} GID={{ backup_host_gid.stdout }}"
+          - "Red Overlay: {{ mongo_backup_network }}"
+          - "URI Backup HA: {{ mongo_backup_uri }}"
+          - "Contenedor temporal: {{ backup_container_name }} (eliminado)"
           - "MongoDB Database Tools: {{ mongodb_tools_version }}"
-          - "Archivo: {{ backup_directory }}/{{ backup_filename }}"
-          - "Checksum: {{ backup_directory }}/{{ backup_filename }}.sha256"
+          - "Archivo host: {{ backup_directory }}/{{ backup_filename }}"
+          - "Checksum host: {{ backup_directory }}/{{ backup_filename }}.sha256"
           - "Tamaño: {{ backup_file.stat.size }} bytes"
           - "Integridad: OK"
           - "============================================================"

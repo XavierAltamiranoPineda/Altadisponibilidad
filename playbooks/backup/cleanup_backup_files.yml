@@ -1,0 +1,41 @@
+---
+- name: Eliminar backups locales de prueba para demostracion
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+
+  tasks:
+
+    - name: Eliminar directorio de backups de la base de prueba
+      ansible.builtin.file:
+        path: "{{ backup_root }}/{{ mongo_database }}"
+        state: absent
+
+    - name: Verificar que los backups fueron eliminados
+      ansible.builtin.stat:
+        path: "{{ backup_root }}/{{ mongo_database }}"
+      register: backup_directory_status
+
+    - name: Confirmar limpieza de backups
+      ansible.builtin.assert:
+        that:
+          - not backup_directory_status.stat.exists
+        fail_msg: "[ERROR] Todavia existen backups de {{ mongo_database }}"
+        success_msg: "[OK] Backups de {{ mongo_database }} eliminados correctamente"
+
+    - name: Mostrar resultado final
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "LIMPIEZA DE BACKUPS COMPLETADA"
+          - "============================================================"
+          - "Base MongoDB: {{ mongo_database }} CONSERVADA"
+          - "Backups: ELIMINADOS"
+          - "Logs: CONSERVADOS"
+          - "Replica Set: NO MODIFICADO"
+          - "Estado: LISTO PARA DEMOSTRACION"
+          - "============================================================"

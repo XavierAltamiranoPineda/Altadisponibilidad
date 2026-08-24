@@ -5,22 +5,30 @@
 
 environment_name: "development"
 
-# Debe ser definido conforme al ambiente real
-mongo_database: "auditoria"
+# Estos valores deben ser definidos por infraestructura
+mongo_database: "{{ development_mongo_database }}"
 
-# Endpoint de conexion para backup en desarrollo
-mongo_backup_host: "mongo1.dev.internal"
-mongo_backup_port: 27017
+# URI de conexion para respaldo con alta disponibilidad en desarrollo (Replica Set)
+mongo_backup_uri: "{{ development_mongo_backup_uri }}"
+
+# Red de contenedores o infraestructura en desarrollo
+mongo_backup_network: "{{ development_mongo_backup_network }}"
+
+# Imagen Docker dedicada para las herramientas de respaldo
+mongo_backup_tools_image: "{{ development_mongo_backup_tools_image | default('mongo-backup-tools:100.18.0') }}"
+
+# Servicios MongoDB para trazabilidad en desarrollo
+mongo_trace_services: "{{ development_mongo_trace_services }}"
 
 # Plataforma de herramientas para ambiente de desarrollo
-mongodb_tools_platform: "ubuntu2404"
-mongodb_tools_arch: "x86_64"
+mongodb_tools_platform: "{{ development_mongodb_tools_platform | default('ubuntu2404') }}"
+mongodb_tools_arch: "{{ development_mongodb_tools_arch | default('x86_64') }}"
 
 # Ruta de respaldo para desarrollo
-backup_root: "/backups/mongodb"
+backup_root: "{{ development_backup_repository }}"
 
 # Ruta de logs
-backup_log_root: "/var/log/mongodb-backup"
+backup_log_root: "{{ development_backup_log_root }}"
 
 # Puede ser cron, Jenkins, Rundeck u otra herramienta institucional
-backup_scheduler: "cron"
+backup_scheduler: "{{ development_backup_scheduler | default('cron') }}"

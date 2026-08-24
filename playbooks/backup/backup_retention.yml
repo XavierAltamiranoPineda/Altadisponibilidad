@@ -1,0 +1,428 @@
+---
+# ============================================================
+# POLITICA DE RETENCION DE RESPALDOS MONGODB
+# ============================================================
+# Reglas implementadas:
+#   - Ventana diaria : conserva los ultimos backup_retention_days dias
+#   - Ventana mensual: conserva el PRIMER backup de cada mes
+#                      durante backup_monthly_retention_months meses
+#   - Seguridad      : nunca elimina sin un backup posterior integro
+#
+# Un backup posterior es integro cuando:
+#   - .archive.gz existe y size > 0
+#   - .sha256 existe y size > 0
+#   - sha256sum -c --quiet pasa sin errores
+#
+# Eliminaciones: siempre juntos .archive.gz y .sha256
+# Bitacora     : timestamp del EVENTO de ejecucion + backup_timestamp separado
+# Idempotente  : state: absent nunca falla si el archivo ya no existe
+#
+# Uso por ambiente (sin hardcodear):
+#   ansible-playbook backup_retention.yml
+#   ansible-playbook backup_retention.yml -e target_environment=development
+#   ansible-playbook backup_retention.yml -e target_environment=production
+#
+# Scripts auxiliares (no modificar logica aqui):
+#   scripts/retention_discover.sh  - descubre archivos, genera JSON de metadatos
+#   scripts/retention_evaluate.sh  - evalua si un candidato tiene posterior integro
+#
+# No toca MongoDB, Docker, Replica Set ni usuarios.
+# No ejecuta mongodump ni mongorestore. No usa rm -rf.
+# ============================================================
+
+- name: Aplicar politica de retencion de respaldos MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+
+  vars:
+    # Ambiente destino. Sobreescribir con: -e target_environment=production
+    target_environment: "local"
+    # Ruta raiz de la base de datos - resuelta despues de cargar el vars de ambiente
+    retention_db_root: "{{ backup_root }}/{{ mongo_database }}"
+    # Rutas absolutas a los scripts auxiliares
+    retention_scripts_dir: "{{ playbook_dir }}/../../scripts"
+
+  tasks:
+
+    # ============================================================
+    # BLOQUE 0: CARGA DE VARIABLES DEL AMBIENTE
+    # ============================================================
+    # Carga local.yml | development.yml | production.yml segun
+    # target_environment. Se ejecuta primero para que retention_db_root
+    # (que referencia backup_root y mongo_database) se resuelva correctamente
+    # en las tareas siguientes.
+
+    - name: "Cargar variables del ambiente: {{ target_environment }}"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../vars/{{ target_environment }}.yml"
+
+    # ============================================================
+    # BLOQUE 1: VALIDACIONES PREVIAS
+    # ============================================================
+
+    # Fix #9: backup_checksum_algorithm se valida explicitamente al inicio.
+    # No se ignora silenciosamente si alguien cambia el valor en common.yml.
+    - name: Validar algoritmo de checksum configurado
+      ansible.builtin.assert:
+        that:
+          - backup_checksum_algorithm == "sha256"
+        fail_msg: >-
+          [ERROR] Algoritmo no soportado: '{{ backup_checksum_algorithm }}'.
+          Este playbook unicamente admite: sha256.
+          Corrija backup_checksum_algorithm en vars/common.yml.
+        success_msg: "[OK] Algoritmo de checksum validado: {{ backup_checksum_algorithm }}"
+
+    # Fix #6: timestamp del EVENTO de ejecucion del playbook
+    - name: Obtener timestamp de ejecucion del playbook
+      ansible.builtin.command:
+        cmd: date +%Y%m%d_%H%M%S
+      register: retention_execution_ts
+      changed_when: false
+
+    - name: Verificar existencia del directorio de respaldos
+      ansible.builtin.stat:
+        path: "{{ retention_db_root }}"
+      register: retention_db_dir
+
+    - name: Informar y terminar limpiamente si el directorio no existe
+      when: not retention_db_dir.stat.exists
+      block:
+        - name: Mostrar mensaje - directorio de respaldos inexistente
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "POLITICA DE RETENCION - SIN ACCION"
+              - "============================================================"
+              - "Ambiente  : {{ environment_name }}"
+              - "Base      : {{ mongo_database }}"
+              - "Directorio: {{ retention_db_root }}"
+              - "Estado    : No existen backups para aplicar retencion"
+              - "============================================================"
+
+        - name: Terminar ejecucion sin error (directorio inexistente)
+          ansible.builtin.meta: end_play
+
+    - name: Crear directorio de bitacoras si no existe
+      ansible.builtin.file:
+        path: "{{ backup_log_root }}"
+        state: directory
+        mode: "0700"
+
+    # ============================================================
+    # BLOQUE 2: DESCUBRIMIENTO DE ARCHIVOS Y CONSTRUCCION DE METADATOS
+    # ============================================================
+    # Fix #4: la logica de extraccion vive en retention_discover.sh
+    #   - usa BASH_REMATCH (sin regex_replace con backreferences en Jinja2)
+    #   - usa $EXT_BASH construida en bash desde el argumento EXT
+    # Fix #3: la extension no esta hardcodeada en ningun script ni en el playbook
+    # Fix #5: el path REAL descubierto por find se incluye en el JSON
+    #
+    # Salida: JSON array [ { filename, path, timestamp, date, month }, ... ]
+    # ordenado cronologicamente ASC (sort -z en el script).
+
+    - name: Descubrir respaldos y construir metadatos JSON
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - "{{ retention_scripts_dir }}/retention_discover.sh"
+          - "{{ retention_db_root }}"
+          - "{{ mongo_database }}"
+          - "{{ backup_extension }}"
+      register: retention_metadata_raw
+      changed_when: false
+
+    - name: Construir lista de metadatos desde JSON
+      ansible.builtin.set_fact:
+        retention_backup_list: "{{ retention_metadata_raw.stdout | from_json }}"
+
+    - name: Informar y terminar limpiamente si no hay archivos de respaldo
+      when: retention_backup_list | length == 0
+      block:
+        - name: Mostrar mensaje - sin archivos de respaldo
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "POLITICA DE RETENCION - SIN ACCION"
+              - "============================================================"
+              - "Ambiente  : {{ environment_name }}"
+              - "Base      : {{ mongo_database }}"
+              - "Directorio: {{ retention_db_root }}"
+              - "Estado    : No existen backups para aplicar retencion"
+              - "============================================================"
+
+        - name: Terminar ejecucion sin error (sin archivos de respaldo)
+          ansible.builtin.meta: end_play
+
+    - name: Mostrar cantidad de respaldos validos encontrados
+      ansible.builtin.debug:
+        msg: "[INFO] Respaldos validos encontrados: {{ retention_backup_list | length }}"
+
+    # ============================================================
+    # BLOQUE 3: CALCULO DE FECHAS DE CORTE
+    # ============================================================
+
+    - name: Calcular fecha de corte para la ventana diaria
+      ansible.builtin.command:
+        cmd: "date -d '-{{ backup_retention_days }} days' +%Y%m%d"
+      register: retention_daily_cutoff
+      changed_when: false
+
+    - name: Calcular mes de corte para la ventana mensual (mes calendario)
+      ansible.builtin.command:
+        # Incluye el mes actual: N meses = retroceder N-1 meses desde hoy.
+        # Ejemplo: backup_monthly_retention_months=12, hoy=2026-08
+        #   date -d '-11 months' +%Y-%m  =>  2025-09
+        #   Protege: 2025-09 .. 2026-08  (12 meses calendario)
+        cmd: "date -d '-{{ backup_monthly_retention_months | int - 1 }} months' +%Y-%m"
+      register: retention_monthly_cutoff
+      changed_when: false
+
+    - name: Mostrar fechas de corte calculadas
+      ansible.builtin.debug:
+        msg:
+          - "[INFO] Corte diario  (date  >= YYYYMMDD): {{ retention_daily_cutoff.stdout }}"
+          - "[INFO] Corte mensual (month >= YYYY-MM) : {{ retention_monthly_cutoff.stdout }}"
+
+    # ============================================================
+    # BLOQUE 4: IDENTIFICACION DE BACKUPS PROTEGIDOS
+    # ============================================================
+
+    # --- 4a. Ventana diaria ---
+    # Protegido si date >= fecha de corte diaria.
+
+    - name: Identificar backups protegidos por ventana diaria
+      ansible.builtin.set_fact:
+        retention_protected_daily: >-
+          {{
+            retention_backup_list
+            | selectattr('date', 'ge', retention_daily_cutoff.stdout)
+            | map(attribute='filename')
+            | list
+          }}
+
+    # --- 4b. Primer backup de cada mes (ventana mensual - mes calendario) ---
+    # retention_backup_list ya esta ordenada por timestamp ASC (script).
+    # groupby('month') preserva ese orden dentro de cada grupo.
+    # map('first') siempre devuelve el PRIMERO cronologico de cada mes.
+    #
+    # La comparacion se hace contra el campo 'month' (YYYY-MM), NO contra 'date'.
+    # Esto garantiza que el mes mas antiguo dentro de la ventana se conserva
+    # completo desde el primer dia, sin cortar a mitad del mes.
+    # retention_monthly_cutoff.stdout tiene formato YYYY-MM.
+
+    - name: Identificar el primer backup de cada mes dentro de la ventana mensual
+      ansible.builtin.set_fact:
+        retention_protected_monthly: >-
+          {{
+            retention_backup_list
+            | selectattr('month', 'ge', retention_monthly_cutoff.stdout)
+            | groupby('month')
+            | map(attribute=1)
+            | map('first')
+            | map(attribute='filename')
+            | list
+          }}
+
+    - name: Construir conjunto unificado de backups protegidos
+      ansible.builtin.set_fact:
+        retention_protected_all: >-
+          {{
+            (retention_protected_daily + retention_protected_monthly)
+            | unique
+            | list
+          }}
+
+    - name: Mostrar resumen de protecciones aplicadas
+      ansible.builtin.debug:
+        msg:
+          - "[INFO] Protegidos ventana diaria  : {{ retention_protected_daily | length }}"
+          - "[INFO] Protegidos ventana mensual : {{ retention_protected_monthly | length }}"
+          - "[INFO] Total protegidos (union)   : {{ retention_protected_all | length }}"
+
+    # ============================================================
+    # BLOQUE 5: IDENTIFICACION DE CANDIDATOS
+    # ============================================================
+    # Candidato = backup cuyo filename NO esta en ninguna lista de proteccion.
+
+    - name: Identificar candidatos a eliminacion
+      ansible.builtin.set_fact:
+        retention_candidates: >-
+          {{
+            retention_backup_list
+            | rejectattr('filename', 'in', retention_protected_all)
+            | list
+          }}
+
+    - name: Mostrar candidatos identificados
+      ansible.builtin.debug:
+        msg: "[INFO] Candidatos a evaluar para eliminacion: {{ retention_candidates | length }}"
+
+    # ============================================================
+    # BLOQUE 6: EVALUACION DE CANDIDATOS
+    # ============================================================
+    # Fix #1: ejecutado con /bin/bash via argv (no dependencia de /bin/sh).
+    # Fix #3: EXT se pasa como argumento - no hardcodeada en el script.
+    # Fix #9: CHECKSUM_ALGO se pasa como argumento - usada en el script.
+    #
+    # El script retention_evaluate.sh recibe como argumentos:
+    #   DB_ROOT CANDIDATE_TS EXT CHECKSUM_ALGO
+    # y devuelve:
+    #   authorized=true|false
+    #   newer_valid=<filename_integro>|<vacio>
+    #
+    # Loop sobre retention_candidates (puede ser lista vacia).
+    # Con lista vacia: cero iteraciones, retention_evaluations.results = []
+    # sin necesidad de inicializacion adicional.
+
+    - name: Evaluar si cada candidato tiene un backup posterior integro
+      ansible.builtin.command:
+        argv:
+          - /bin/bash
+          - "{{ retention_scripts_dir }}/retention_evaluate.sh"
+          - "{{ retention_db_root }}"
+          - "{{ mongo_database }}"
+          - "{{ backup_extension }}"
+          - "{{ item.timestamp }}"
+          - "{{ backup_checksum_algorithm }}"
+      loop: "{{ retention_candidates }}"
+      loop_control:
+        label: "{{ item.filename }}"
+      register: retention_evaluations
+      changed_when: false
+
+    # ============================================================
+    # BLOQUE 7: ELIMINACION DE BACKUPS AUTORIZADOS
+    # ============================================================
+    # Fix #5: usa item.item.path (ruta REAL descubierta por find en el script).
+    # No reconstruye rutas desde retention_db_root + month + filename.
+    # Elimina .archive.gz y .sha256 en tareas separadas.
+    # state: absent es idempotente: si el archivo ya no existe, no falla.
+
+    - name: Eliminar archivo de respaldo autorizado (.archive.gz)
+      ansible.builtin.file:
+        path: "{{ item.item.path }}"
+        state: absent
+      loop: "{{ retention_evaluations.results }}"
+      loop_control:
+        label: "{{ item.item.filename }}"
+      when: "'authorized=true' in item.stdout"
+
+    - name: Eliminar archivo de verificacion autorizado (.sha256)
+      ansible.builtin.file:
+        path: "{{ item.item.path }}.sha256"
+        state: absent
+      loop: "{{ retention_evaluations.results }}"
+      loop_control:
+        label: "{{ item.item.filename }}.sha256"
+      when: "'authorized=true' in item.stdout"
+
+    # ============================================================
+    # BLOQUE 8: REGISTRO EN BITACORA
+    # ============================================================
+    # Fix #6: retention_execution_ts.stdout es el timestamp del EVENTO
+    #   (momento de ejecucion del playbook).
+    #   El timestamp del backup aparece como campo separado: backup_timestamp.
+    #
+    # Formato DELETE:
+    #   YYYYMMDD_HHMMSS | environment=X | database=X | file=X
+    #   | backup_timestamp=X | action=DELETE | reason=RETENTION_POLICY
+    #   | newer_valid_backup=X | result=SUCCESS
+    #
+    # Formato SKIP:
+    #   YYYYMMDD_HHMMSS | environment=X | database=X | file=X
+    #   | backup_timestamp=X | action=SKIP | reason=NO_NEWER_VALID_BACKUP
+    #   | result=PROTECTED
+
+    - name: Registrar eliminaciones autorizadas en bitacora
+      ansible.builtin.lineinfile:
+        path: "{{ backup_log_root }}/{{ backup_retention_log_filename }}"
+        create: true
+        mode: "0600"
+        insertafter: EOF
+        line: >-
+          {{ retention_execution_ts.stdout }}
+          | environment={{ environment_name }}
+          | database={{ mongo_database }}
+          | file={{ item.item.filename }}
+          | backup_timestamp={{ item.item.timestamp }}
+          | action=DELETE
+          | reason=RETENTION_POLICY
+          | newer_valid_backup={{
+              item.stdout_lines
+              | select('match', '^newer_valid=.+')
+              | first
+              | default('newer_valid=')
+              | regex_replace('^newer_valid=', '')
+            }}
+          | result=SUCCESS
+      loop: "{{ retention_evaluations.results }}"
+      loop_control:
+        label: "{{ item.item.filename }}"
+      when: "'authorized=true' in item.stdout"
+
+    - name: Registrar backups omitidos por seguridad en bitacora
+      ansible.builtin.lineinfile:
+        path: "{{ backup_log_root }}/{{ backup_retention_log_filename }}"
+        create: true
+        mode: "0600"
+        insertafter: EOF
+        line: >-
+          {{ retention_execution_ts.stdout }}
+          | environment={{ environment_name }}
+          | database={{ mongo_database }}
+          | file={{ item.item.filename }}
+          | backup_timestamp={{ item.item.timestamp }}
+          | action=SKIP
+          | reason=NO_NEWER_VALID_BACKUP
+          | result=PROTECTED
+      loop: "{{ retention_evaluations.results }}"
+      loop_control:
+        label: "{{ item.item.filename }}"
+      when: "'authorized=false' in item.stdout"
+
+    # ============================================================
+    # BLOQUE 9: CONTEO FINAL DE RESULTADOS
+    # ============================================================
+
+    - name: Calcular contadores de resultado
+      ansible.builtin.set_fact:
+        retention_count_deleted: >-
+          {{
+            retention_evaluations.results
+            | selectattr('stdout', 'search', 'authorized=true')
+            | list | length
+          }}
+        retention_count_skipped: >-
+          {{
+            retention_evaluations.results
+            | selectattr('stdout', 'search', 'authorized=false')
+            | list | length
+          }}
+
+    # ============================================================
+    # RESULTADO FINAL
+    # ============================================================
+
+    - name: Resultado final de la politica de retencion
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "POLITICA DE RETENCION COMPLETADA"
+          - "============================================================"
+          - "Ambiente                    : {{ environment_name }}"
+          - "Base                        : {{ mongo_database }}"
+          - "Retencion diaria            : {{ backup_retention_days }} dias"
+          - "Retencion mensual           : {{ backup_monthly_retention_months }} meses"
+          - "Backups encontrados         : {{ retention_backup_list | length }}"
+          - "Backups protegidos diarios  : {{ retention_protected_daily | length }}"
+          - "Backups protegidos mensuales: {{ retention_protected_monthly | length }}"
+          - "Candidatos evaluados        : {{ retention_candidates | length }}"
+          - "Backups eliminados          : {{ retention_count_deleted }}"
+          - "Backups omitidos (seguridad): {{ retention_count_skipped }}"
+          - "Bitacora                    : {{ backup_log_root }}/{{ backup_retention_log_filename }}"
+          - "Estado                      : RETENCION VALIDADA"
+          - "============================================================"

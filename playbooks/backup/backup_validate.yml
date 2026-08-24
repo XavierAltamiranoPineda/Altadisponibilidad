@@ -6,9 +6,37 @@
 
   vars_files:
     - "{{ playbook_dir }}/../../vars/common.yml"
-    - "{{ playbook_dir }}/../../vars/local.yml"
+
+  vars:
+    target_environment: "local"
 
   tasks:
+
+    # ============================================================
+    # CARGA DE VARIABLES DEL AMBIENTE
+    # ============================================================
+
+    - name: "Cargar variables del ambiente: {{ target_environment }}"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../vars/{{ target_environment }}.yml"
+
+    # ============================================================
+    # VALIDACION DE CONFIGURACION
+    # ============================================================
+
+    - name: Validar algoritmo de checksum configurado
+      ansible.builtin.assert:
+        that:
+          - backup_checksum_algorithm == "sha256"
+        fail_msg: >-
+          [ERROR] Algoritmo de checksum no soportado.
+          Esperado: sha256
+          Configurado: {{ backup_checksum_algorithm }}
+        success_msg: "[OK] Algoritmo de checksum validado: {{ backup_checksum_algorithm }}"
+
+    # ============================================================
+    # BUSQUEDA Y VALIDACION DEL BACKUP
+    # ============================================================
 
     - name: Buscar respaldo mas reciente
       ansible.builtin.shell: |
@@ -81,7 +109,7 @@
         that:
           - >
             backup_file_path | basename
-            is match('^' ~ mongo_database ~ '_[0-9]{8}_[0-9]{6}\\.archive\\.gz$')
+            is match('^' ~ mongo_database ~ '_[0-9]{8}_[0-9]{6}' ~ (backup_extension | regex_escape) ~ '$')
         fail_msg: "[ERROR] El nombre del respaldo no cumple la convencion institucional"
         success_msg: "[OK] Convencion de nombre validada"
 
@@ -108,8 +136,7 @@
         fail_msg: >-
           [ERROR] Version incorrecta de mongodump.
           Esperada: {{ mongodb_tools_version }}
-        success_msg: >-
-          [OK] mongodump {{ mongodb_tools_version }} validado
+        success_msg: "[OK] mongodump {{ mongodb_tools_version }} validado"
 
     - name: Validar version aprobada de mongorestore
       ansible.builtin.assert:
@@ -118,8 +145,7 @@
         fail_msg: >-
           [ERROR] Version incorrecta de mongorestore.
           Esperada: {{ mongodb_tools_version }}
-        success_msg: >-
-          [OK] mongorestore {{ mongodb_tools_version }} validado
+        success_msg: "[OK] mongorestore {{ mongodb_tools_version }} validado"
 
     # ============================================================
     # RESULTADO
