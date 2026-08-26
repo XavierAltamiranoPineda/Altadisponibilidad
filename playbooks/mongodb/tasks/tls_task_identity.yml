@@ -1,0 +1,80 @@
+---
+# ============================================================
+# Validacion estricta de identidad de nodo via mongosh directConnection
+# ============================================================
+
+- name: Validar identidad del nodo {{ mongo_tls_identity_node }}
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - "{{ mongo_network }}"
+      - --env
+      - MONGO_ADMIN_USER
+      - --env
+      - MONGO_ADMIN_PASSWORD
+      - "{{ mongo_image }}"
+      - mongosh
+      - --quiet
+      - --nodb
+      - --eval
+      - |
+          const user = process.env.MONGO_ADMIN_USER;
+          const pass = process.env.MONGO_ADMIN_PASSWORD;
+          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@{{ mongo_tls_identity_node }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=10000`;
+          const db = connect(uri);
+          const st = db.adminCommand({replSetGetStatus: 1});
+          const selfMember = st.members.find(m => m.self);
+          if (!selfMember) {
+            console.error('ERROR_NO_SELF_MEMBER');
+            quit(10);
+          }
+          if (selfMember.name !== '{{ mongo_tls_identity_node }}:27017') {
+            console.error(`ERROR_WRONG_NAME: expected {{ mongo_tls_identity_node }}:27017 got ${selfMember.name}`);
+            quit(11);
+          }
+          if (selfMember.health !== 1) {
+            console.error(`ERROR_UNHEALTHY: health=${selfMember.health}`);
+            quit(12);
+          }
+          if (st.members.filter(m => m.self).length !== 1) {
+            console.error('ERROR_MULTIPLE_SELF');
+            quit(13);
+          }
+          print('IDENTITY_VERIFIED=' + JSON.stringify({
+            node: '{{ mongo_tls_identity_node }}',
+            name: selfMember.name,
+            stateStr: selfMember.stateStr,
+            health: selfMember.health
+          }));
+  environment:
+    MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+    MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+  register: mongo_tls_identity_raw
+  changed_when: false
+  no_log: true
+  retries: 15
+  delay: 3
+  until: mongo_tls_identity_raw.rc == 0 and 'IDENTITY_VERIFIED=' in mongo_tls_identity_raw.stdout
+
+- name: Interpretar validacion de identidad
+  ansible.builtin.set_fact:
+    mongo_tls_identity_result: >-
+      {{
+        (mongo_tls_identity_raw.stdout_lines
+         | select('match', '^IDENTITY_VERIFIED=') | first
+         | regex_replace('^IDENTITY_VERIFIED=', ''))
+        | from_json
+      }}
+  no_log: true
+
+- name: Validar resultado de identidad para {{ mongo_tls_identity_node }}
+  ansible.builtin.assert:
+    that:
+      - mongo_tls_identity_result.node == mongo_tls_identity_node
+      - mongo_tls_identity_result.name == (mongo_tls_identity_node ~ ':27017')
+      - mongo_tls_identity_result.health == 1
+      - mongo_tls_identity_result.stateStr in ['PRIMARY', 'SECONDARY']
+    fail_msg: "Identidad o salud de {{ mongo_tls_identity_node }} no coincide."

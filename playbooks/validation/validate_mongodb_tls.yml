@@ -1,0 +1,64 @@
+---
+- name: Validar MongoDB TLS y plaintext
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/{{ target_environment | default('local') }}.yml"
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    tls_target_environment: "{{ target_environment | default('local') }}"
+    mongo_tls_expected_mode: "{{ expected_tls_mode | default('allowTLS') }}"
+    mongo_network: "mongo_swarm_net"
+    mongo_tls_service_names:
+      - mongo1
+      - mongo2
+      - mongo3
+
+  tasks:
+    - name: Validar alcance y estado persistido
+      ansible.builtin.assert:
+        that:
+          - tls_target_environment == 'local'
+          - environment_name == 'local'
+          - mongo_tls_expected_mode == 'allowTLS'
+          - mongo_tls_enabled | bool
+          - not (mongo_tls_clients_enabled | bool)
+          - mongo_tls_deployment_mode == mongo_tls_expected_mode
+          - mongo_tls_target_mode == 'requireTLS'
+        fail_msg: "Estado TLS persistido no corresponde a allowTLS LOCAL."
+
+    - name: Resolver ruta canónica de CA
+      ansible.builtin.command:
+        argv:
+          - realpath
+          - "{{ mongo_tls_ca_cert_path }}"
+      register: mongo_tls_ca_realpath
+      changed_when: false
+
+    - name: Registrar CA canónica
+      ansible.builtin.set_fact:
+        mongo_tls_ca_canonical: "{{ mongo_tls_ca_realpath.stdout | trim }}"
+
+    - name: Inspeccionar red MongoDB
+      ansible.builtin.command:
+        argv:
+          - docker
+          - network
+          - inspect
+          - "{{ mongo_network }}"
+      register: mongo_tls_network_raw
+      changed_when: false
+
+    - name: Registrar red MongoDB
+      ansible.builtin.set_fact:
+        mongo_tls_network_id: "{{ (mongo_tls_network_raw.stdout | from_json | first).Id }}"
+
+    - name: Detectar runtime aprobado
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../mongodb/tasks/tls_runtime_facts.yml"
+
+    - name: Ejecutar validación TLS completa
+      ansible.builtin.include_tasks: tasks/validate_mongodb_tls_tasks.yml

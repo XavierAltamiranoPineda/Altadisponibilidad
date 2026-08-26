@@ -1,0 +1,42 @@
+---
+- name: Esperar convergencia Swarm del servicio {{ mongo_tls_wait_service }}
+  ansible.builtin.command:
+    argv:
+      - docker
+      - service
+      - inspect
+      - "{{ mongo_tls_wait_service }}"
+  register: mongo_tls_wait_inspect
+  changed_when: false
+  retries: 60
+  delay: 3
+  until:
+    - mongo_tls_wait_inspect.rc == 0
+    - >-
+      ((mongo_tls_wait_inspect.stdout | from_json | first).UpdateStatus.State
+      | default('completed')) in ['completed', 'rollback_completed']
+
+- name: Verificar que UpdateStatus no es rollback_completed cuando se exige completed
+  ansible.builtin.assert:
+    that:
+      - >-
+        ((mongo_tls_wait_inspect.stdout | from_json | first).UpdateStatus.State
+        | default('completed')) != 'rollback_completed'
+    fail_msg: "Swarm ejecuto rollback automatico no deseado en {{ mongo_tls_wait_service }}."
+  when: mongo_tls_wait_expect_completed_only | default(false) | bool
+
+- name: Esperar servicio 1/1 para {{ mongo_tls_wait_service }}
+  ansible.builtin.command:
+    argv:
+      - docker
+      - service
+      - ls
+      - --filter
+      - "name={{ mongo_tls_wait_service }}"
+      - --format
+      - "{{ '{{.Replicas}}' }}"
+  register: mongo_tls_wait_replicas
+  changed_when: false
+  retries: 60
+  delay: 3
+  until: mongo_tls_wait_replicas.stdout | trim == '1/1'

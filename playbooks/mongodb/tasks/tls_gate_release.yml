@@ -1,0 +1,94 @@
+---
+# ============================================================
+# Liberacion segura del gate via helper container sobre control volume
+# ============================================================
+
+- name: Re-verificar identidad de ContainerID antes de liberar gate en {{ mongo_tls_release_node }}
+  ansible.builtin.command:
+    argv:
+      - curl
+      - --silent
+      - --unix-socket
+      - /var/run/docker.sock
+      - "http://localhost/tasks?filters=%7B%22service%22%3A%5B%22{{ mongo_tls_release_node }}%22%5D%2C%22desired-state%22%3A%5B%22running%22%5D%7D"
+  register: mongo_tls_release_recheck_raw
+  changed_when: false
+
+- name: Validar que el ContainerID de {{ mongo_tls_release_node }} no cambio
+  ansible.builtin.assert:
+    that:
+      - >
+        (mongo_tls_release_recheck_raw.stdout | from_json
+         | selectattr('Status.State', 'equalto', 'running') | map(attribute='Status')
+         | map(attribute='ContainerStatus') | map(attribute='ContainerID') | first)
+        == mongo_tls_task_info[mongo_tls_release_node].container_id
+    fail_msg: "ContainerID de {{ mongo_tls_release_node }} cambio antes del gate release."
+
+- name: Validar operation-active y escribir operation-start generacional en {{ mongo_tls_release_node }}
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ mongo_tls_control_volume_names[mongo_tls_release_node] }}:/ctrl:rw"
+      - "{{ mongo_image }}"
+      - sh
+      - -ec
+      - |
+        EXPECTED_OPERATION_ID="$1"
+        EXPECTED_NODE="$2"
+        EXPECTED_MODE="$3"
+        EXPECTED_TARGET="$4"
+        ACTIVE_FILE=/ctrl/operation-active
+
+        test -f "$ACTIVE_FILE"
+        ACTIVE_OPERATION_ID="$(grep '^operation_id=' "$ACTIVE_FILE" | cut -d= -f2- || true)"
+        ACTIVE_NODE="$(grep '^node=' "$ACTIVE_FILE" | cut -d= -f2- || true)"
+        ACTIVE_MODE="$(grep '^mode=' "$ACTIVE_FILE" | cut -d= -f2- || true)"
+        ACTIVE_TARGET="$(grep '^target=' "$ACTIVE_FILE" | cut -d= -f2- || true)"
+
+        [ "$ACTIVE_OPERATION_ID" = "$EXPECTED_OPERATION_ID" ] || exit 1
+        [ "$ACTIVE_NODE" = "$EXPECTED_NODE" ] || exit 1
+        [ "$ACTIVE_MODE" = "$EXPECTED_MODE" ] || exit 1
+        [ "$ACTIVE_TARGET" = "$EXPECTED_TARGET" ] || exit 1
+
+        printf 'operation_id=%s\n' "$EXPECTED_OPERATION_ID" > /ctrl/.operation-start.tmp
+        chmod 0644 /ctrl/.operation-start.tmp
+        mv -f /ctrl/.operation-start.tmp /ctrl/operation-start
+        echo "RELEASED node=$EXPECTED_NODE operation_id=$EXPECTED_OPERATION_ID"
+      - --
+      - "{{ mongo_tls_operation_id }}"
+      - "{{ mongo_tls_release_node }}"
+      - "{{ mongo_tls_operation_mode }}"
+      - "{{ mongo_tls_target_mode_expected }}"
+  register: mongo_tls_release_touch_raw
+  changed_when: "'RELEASED' in mongo_tls_release_touch_raw.stdout"
+
+- name: Verificar operation_id de operation-start en {{ mongo_tls_release_node }}
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ mongo_tls_control_volume_names[mongo_tls_release_node] }}:/ctrl:ro"
+      - "{{ mongo_image }}"
+      - sh
+      - -ec
+      - |
+        test -f /ctrl/operation-start
+        test "$(cat /ctrl/operation-start)" = "operation_id=$1"
+        echo "START_VERIFIED operation_id=$1"
+      - --
+      - "{{ mongo_tls_operation_id }}"
+  changed_when: false
+
+- name: Registrar gate liberado para {{ mongo_tls_release_node }}
+  ansible.builtin.set_fact:
+    mongo_tls_gate_released_nodes: >-
+      {{
+        mongo_tls_gate_released_nodes | default({}) | combine({
+          mongo_tls_release_node: true
+        })
+      }}

@@ -5,6 +5,23 @@
 
 environment_name: "production"
 
+# ============================================================
+# TLS PRODUCCION - PKI PROPORCIONADA POR INFRAESTRUCTURA
+# ============================================================
+
+mongo_tls_enabled: "{{ production_mongo_tls_enabled }}"
+mongo_tls_clients_enabled: "{{ production_mongo_tls_clients_enabled }}"
+mongo_tls_target_mode: "{{ production_mongo_tls_target_mode }}"
+mongo_tls_deployment_mode: "{{ production_mongo_tls_deployment_mode }}"
+
+mongo_tls_provisioning_source: "pki_provided"
+mongo_tls_secret_version: "{{ production_mongo_tls_secret_version }}"
+mongo_tls_ca_secret_version: "{{ production_mongo_tls_ca_secret_version }}"
+mongo_tls_node_secret_version: "{{ production_mongo_tls_node_secret_version }}"
+
+mongo_tls_ca_cert_path: "{{ production_mongo_tls_ca_cert_path }}"
+mongo_tls_nodes_certificates: "{{ production_mongo_tls_nodes_certificates }}"
+
 # Estos valores deben ser definidos por infraestructura
 mongo_database: "{{ production_mongo_database }}"
 

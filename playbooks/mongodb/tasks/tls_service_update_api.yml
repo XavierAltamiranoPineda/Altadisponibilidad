@@ -1,0 +1,206 @@
+---
+# ============================================================
+# Actualizacion atomica de servicio via Docker Engine API
+# ============================================================
+
+- name: Obtener Version.Index actual de {{ mongo_tls_target_node }}
+  ansible.builtin.command:
+    argv:
+      - curl
+      - --silent
+      - --fail-with-body
+      - --unix-socket
+      - /var/run/docker.sock
+      - "http://localhost/services/{{ mongo_tls_snapshot_services[mongo_tls_target_node].identity.service_id }}"
+  register: mongo_tls_current_service_inspect_raw
+  changed_when: false
+
+- name: Extraer Version.Index actual
+  ansible.builtin.set_fact:
+    mongo_tls_node_current_version_index: >-
+      {{ (mongo_tls_current_service_inspect_raw.stdout | from_json).Version.Index | int }}
+
+- name: Verificar optimistic concurrency para {{ mongo_tls_target_node }}
+  ansible.builtin.assert:
+    that:
+      - mongo_tls_node_current_version_index == (mongo_tls_expected_version_index | int)
+    fail_msg: >
+      OPTIMISTIC_CONCURRENCY_VIOLATION en {{ mongo_tls_target_node }}:
+      Version.Index esperado={{ mongo_tls_expected_version_index }},
+      Version.Index real={{ mongo_tls_node_current_version_index }}.
+      Marcando NEEDS_MANUAL_RECOVERY.
+
+- name: Extraer y clasificar mounts de snapshot para {{ mongo_tls_target_node }}
+  ansible.builtin.set_fact:
+    mongo_tls_base_mounts: >-
+      {{
+        mongo_tls_snapshot_services[mongo_tls_target_node].container_spec.Mounts | default([])
+        | rejectattr('Target', 'equalto', '/run/tls-control')
+        | rejectattr('Target', 'equalto', '/run/mongo-tls')
+        | list
+      }}
+
+- name: Extraer mount de datos /data/db
+  ansible.builtin.set_fact:
+    mongo_tls_data_mounts: >-
+      {{
+        mongo_tls_base_mounts
+        | selectattr('Target', 'equalto', '/data/db')
+        | list
+      }}
+
+- name: Validar invariante estricto de mount /data/db para {{ mongo_tls_target_node }}
+  ansible.builtin.assert:
+    that:
+      - mongo_tls_data_mounts | length == 1
+    fail_msg: "Esperado exactamente un mount en /data/db para {{ mongo_tls_target_node }}."
+
+- name: Extraer SecretReference de mongo_keyfile desde snapshot
+  ansible.builtin.set_fact:
+    mongo_tls_keyfile_secret_ref: >-
+      {{
+        mongo_tls_snapshot_services[mongo_tls_target_node].secrets
+        | selectattr('SecretName', 'equalto', 'mongo_keyfile')
+        | first
+      }}
+
+- name: Validar SecretReference de mongo_keyfile
+  ansible.builtin.assert:
+    that:
+      - mongo_tls_keyfile_secret_ref.SecretID is defined
+      - mongo_tls_keyfile_secret_ref.SecretID | length > 0
+      - mongo_tls_keyfile_secret_ref.File.Name == 'mongo_keyfile'
+    fail_msg: "SecretReference de mongo_keyfile no valido en {{ mongo_tls_target_node }}."
+
+- name: Construir ServiceSpec JSON para {{ mongo_tls_target_node }} ({{ mongo_tls_target_spec_mode }})
+  ansible.builtin.set_fact:
+    mongo_tls_target_service_spec: >-
+      {%- set base_spec = mongo_tls_snapshot_services[mongo_tls_target_node].spec -%}
+      {%- set base_tt = base_spec.TaskTemplate -%}
+      {%- set base_cs = base_tt.ContainerSpec -%}
+      {%- set control_mount = {
+            'Type': 'volume',
+            'Source': mongo_tls_control_volume_names[mongo_tls_target_node],
+            'Target': '/run/tls-control',
+            'ReadOnly': true
+          } -%}
+      {%- set tmpfs_mount = {
+            'Type': 'tmpfs',
+            'Target': '/run/mongo-tls',
+            'TmpfsOptions': {
+              'SizeBytes': 1048576,
+              'Mode': 448
+            }
+          } -%}
+      {%- set ca_sec = {
+            'File': {'Name': 'mongo_tls_ca', 'UID': '0', 'GID': '0', 'Mode': 292},
+            'SecretID': mongo_tls_ca_secret_id,
+            'SecretName': 'mongo_tls_ca_' ~ mongo_tls_ca_secret_version
+          } -%}
+      {%- set node_pem_sec = {
+            'File': {'Name': 'mongo_tls_node_pem', 'UID': '0', 'GID': '0', 'Mode': 256},
+            'SecretID': mongo_tls_node_pem_secret_ids[mongo_tls_target_node],
+            'SecretName': mongo_tls_target_node ~ '_tls_pem_' ~ mongo_tls_node_secret_version
+          } -%}
+      {%- if mongo_tls_target_spec_mode == 'permanent_allowtls' -%}
+        {%- set final_mounts = mongo_tls_base_mounts + [control_mount, tmpfs_mount] -%}
+        {%- set final_secrets = [mongo_tls_keyfile_secret_ref, ca_sec, node_pem_sec] -%}
+        {%- set target_tls_arg = 'allowTLS' -%}
+      {%- else -%}
+        {%- set final_mounts = mongo_tls_base_mounts + [control_mount] -%}
+        {%- set final_secrets = [mongo_tls_keyfile_secret_ref] -%}
+        {%- set target_tls_arg = 'disabled' -%}
+      {%- endif -%}
+      {%- set new_cs = base_cs | combine({
+            'Command': ['/bin/sh'],
+            'Args': [
+              '-ec',
+              mongo_tls_runtime_script,
+              '--',
+              mongo_tls_runtime_identity.uid | string,
+              mongo_tls_runtime_identity.gid | string,
+              mongo_tls_runtime_identity.entrypoint,
+              target_tls_arg,
+              mongo_tls_target_node
+            ],
+            'Mounts': final_mounts,
+            'Secrets': final_secrets,
+            'StopGracePeriod': (base_cs.StopGracePeriod | default(10000000000))
+          }) -%}
+      {%- set new_tt = base_tt | combine({
+            'ContainerSpec': new_cs,
+            'ForceUpdate': (base_tt.ForceUpdate | default(0) | int) + (1 if mongo_tls_force_update | default(false) | bool else 0)
+          }) -%}
+      {{
+        base_spec | combine({
+          'TaskTemplate': new_tt,
+          'UpdateConfig': (base_spec.UpdateConfig | default({
+            'Parallelism': 1,
+            'FailureAction': 'pause',
+            'Monitor': 120000000000,
+            'MaxFailureRatio': 0,
+            'Order': 'stop-first'
+          })),
+          'RollbackConfig': (base_spec.RollbackConfig | default({
+            'Parallelism': 1,
+            'FailureAction': 'pause',
+            'Monitor': 120000000000,
+            'MaxFailureRatio': 0,
+            'Order': 'stop-first'
+          }))
+        })
+      }}
+
+- name: Escribir spec JSON temporal para {{ mongo_tls_target_node }}
+  ansible.builtin.copy:
+    dest: "{{ backup_log_root | default('logs') }}/tls_update_spec_{{ mongo_tls_target_node }}.json"
+    mode: "0600"
+    content: "{{ mongo_tls_target_service_spec | to_json }}"
+
+- name: Aplicar POST /services/{id}/update para {{ mongo_tls_target_node }}
+  ansible.builtin.command:
+    argv:
+      - curl
+      - --silent
+      - --fail-with-body
+      - --unix-socket
+      - /var/run/docker.sock
+      - -X
+      - POST
+      - "http://localhost/services/{{ mongo_tls_snapshot_services[mongo_tls_target_node].identity.service_id }}/update?version={{ mongo_tls_node_current_version_index }}"
+      - -H
+      - "Content-Type: application/json"
+      - -d
+      - "@{{ backup_log_root | default('logs') }}/tls_update_spec_{{ mongo_tls_target_node }}.json"
+  register: mongo_tls_api_update_result
+  changed_when: true
+  failed_when: mongo_tls_api_update_result.rc != 0
+
+- name: Re-inspeccionar {{ mongo_tls_target_node }} via API para capturar Version.Index REAL
+  ansible.builtin.command:
+    argv:
+      - curl
+      - --silent
+      - --fail-with-body
+      - --unix-socket
+      - /var/run/docker.sock
+      - "http://localhost/services/{{ mongo_tls_snapshot_services[mongo_tls_target_node].identity.service_id }}"
+  register: mongo_tls_post_update_inspect_raw
+  changed_when: false
+  retries: 5
+  delay: 2
+
+- name: Registrar Version.Index real post-update para {{ mongo_tls_target_node }}
+  ansible.builtin.set_fact:
+    mongo_tls_service_current_version: >-
+      {{
+        mongo_tls_service_current_version | default({}) | combine({
+          mongo_tls_target_node: ((mongo_tls_post_update_inspect_raw.stdout | from_json).Version.Index | int)
+        })
+      }}
+    mongo_tls_node_spec_status: >-
+      {{
+        mongo_tls_node_spec_status | default({}) | combine({
+          mongo_tls_target_node: mongo_tls_target_spec_mode
+        })
+      }}

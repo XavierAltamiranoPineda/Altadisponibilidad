@@ -1,0 +1,91 @@
+---
+# ============================================================
+# Persistencia estructurada de estado en logs/tls_rollout_state.json
+# ============================================================
+
+- name: Asegurar directorio de logs
+  ansible.builtin.file:
+    path: "{{ backup_log_root | default('logs') }}"
+    state: directory
+    mode: "0755"
+
+- name: Construir documento de estado
+  ansible.builtin.set_fact:
+    mongo_tls_state_document:
+      rollout_id: "{{ mongo_tls_rollout_id | default('unknown') }}"
+      timestamp: "{{ ansible_date_time.iso8601 }}"
+      phase: "{{ mongo_tls_current_phase | default('UNKNOWN') }}"
+      operation_id: "{{ mongo_tls_operation_id | default('') }}"
+      operation_mode: "{{ mongo_tls_operation_mode | default('') }}"
+      operation_deadline: "{{ mongo_tls_operation_deadline | default(0) }}"
+      source_mode: "{{ mongo_tls_source_mode | default('disabled') }}"
+      target_mode: "{{ mongo_tls_target_mode_expected | default('allowTLS') }}"
+      needs_manual_recovery: "{{ mongo_tls_needs_manual_recovery | default(false) | bool }}"
+      cleanup_verified: "{{ mongo_tls_cleanup_verified | default(false) | bool }}"
+      rollback_all_services: "{{ mongo_tls_rollback_all_services | default(true) | bool }}"
+      services:
+        mongo1:
+          service_id: "{{ (mongo_tls_snapshot_services.mongo1.identity.service_id) | default('') }}"
+          current_permanent_spec: "{{ mongo_tls_node_spec_status.mongo1 | default('unknown') }}"
+          version_index_snapshot: "{{ (mongo_tls_snapshot_services.mongo1.identity.version_index_at_snapshot) | default(none) }}"
+          version_index_after_update: "{{ (mongo_tls_service_current_version.mongo1) | default(none) }}"
+          # forward phase tracking
+          forward_old_task_id: "{{ (mongo_tls_old_task_info.mongo1.task_id) | default('') }}"
+          forward_old_container_id: "{{ (mongo_tls_old_task_info.mongo1.container_id) | default('') }}"
+          forward_new_task_id: "{{ (mongo_tls_task_info.mongo1.task_id) | default('') }}"
+          forward_new_container_id: "{{ (mongo_tls_task_info.mongo1.container_id) | default('') }}"
+          # rollback phase tracking (populated by tls_rollback_transition.yml)
+          rollback_old_task_id: "{{ (mongo_tls_rollback_old_task_info.mongo1.task_id) | default('') }}"
+          rollback_old_container_id: "{{ (mongo_tls_rollback_old_task_info.mongo1.container_id) | default('') }}"
+          rollback_new_task_id: "{{ (mongo_tls_rollback_task_info.mongo1.task_id) | default('') }}"
+          rollback_new_container_id: "{{ (mongo_tls_rollback_task_info.mongo1.container_id) | default('') }}"
+          gate_ready: "{{ mongo_tls_gate_ready_nodes.mongo1 | default(false) | bool }}"
+          gate_released: "{{ mongo_tls_gate_released_nodes.mongo1 | default(false) | bool }}"
+          mongod_started: "{{ mongo_tls_mongod_started_nodes.mongo1 | default(false) | bool }}"
+          control_state: "{{ mongo_tls_control_state_nodes.mongo1 | default('none') }}"
+        mongo2:
+          service_id: "{{ (mongo_tls_snapshot_services.mongo2.identity.service_id) | default('') }}"
+          current_permanent_spec: "{{ mongo_tls_node_spec_status.mongo2 | default('unknown') }}"
+          version_index_snapshot: "{{ (mongo_tls_snapshot_services.mongo2.identity.version_index_at_snapshot) | default(none) }}"
+          version_index_after_update: "{{ (mongo_tls_service_current_version.mongo2) | default(none) }}"
+          forward_old_task_id: "{{ (mongo_tls_old_task_info.mongo2.task_id) | default('') }}"
+          forward_old_container_id: "{{ (mongo_tls_old_task_info.mongo2.container_id) | default('') }}"
+          forward_new_task_id: "{{ (mongo_tls_task_info.mongo2.task_id) | default('') }}"
+          forward_new_container_id: "{{ (mongo_tls_task_info.mongo2.container_id) | default('') }}"
+          rollback_old_task_id: "{{ (mongo_tls_rollback_old_task_info.mongo2.task_id) | default('') }}"
+          rollback_old_container_id: "{{ (mongo_tls_rollback_old_task_info.mongo2.container_id) | default('') }}"
+          rollback_new_task_id: "{{ (mongo_tls_rollback_task_info.mongo2.task_id) | default('') }}"
+          rollback_new_container_id: "{{ (mongo_tls_rollback_task_info.mongo2.container_id) | default('') }}"
+          gate_ready: "{{ mongo_tls_gate_ready_nodes.mongo2 | default(false) | bool }}"
+          gate_released: "{{ mongo_tls_gate_released_nodes.mongo2 | default(false) | bool }}"
+          mongod_started: "{{ mongo_tls_mongod_started_nodes.mongo2 | default(false) | bool }}"
+          control_state: "{{ mongo_tls_control_state_nodes.mongo2 | default('none') }}"
+        mongo3:
+          service_id: "{{ (mongo_tls_snapshot_services.mongo3.identity.service_id) | default('') }}"
+          current_permanent_spec: "{{ mongo_tls_node_spec_status.mongo3 | default('unknown') }}"
+          version_index_snapshot: "{{ (mongo_tls_snapshot_services.mongo3.identity.version_index_at_snapshot) | default(none) }}"
+          version_index_after_update: "{{ (mongo_tls_service_current_version.mongo3) | default(none) }}"
+          forward_old_task_id: "{{ (mongo_tls_old_task_info.mongo3.task_id) | default('') }}"
+          forward_old_container_id: "{{ (mongo_tls_old_task_info.mongo3.container_id) | default('') }}"
+          forward_new_task_id: "{{ (mongo_tls_task_info.mongo3.task_id) | default('') }}"
+          forward_new_container_id: "{{ (mongo_tls_task_info.mongo3.container_id) | default('') }}"
+          rollback_old_task_id: "{{ (mongo_tls_rollback_old_task_info.mongo3.task_id) | default('') }}"
+          rollback_old_container_id: "{{ (mongo_tls_rollback_old_task_info.mongo3.container_id) | default('') }}"
+          rollback_new_task_id: "{{ (mongo_tls_rollback_task_info.mongo3.task_id) | default('') }}"
+          rollback_new_container_id: "{{ (mongo_tls_rollback_task_info.mongo3.container_id) | default('') }}"
+          gate_ready: "{{ mongo_tls_gate_ready_nodes.mongo3 | default(false) | bool }}"
+          gate_released: "{{ mongo_tls_gate_released_nodes.mongo3 | default(false) | bool }}"
+          mongod_started: "{{ mongo_tls_mongod_started_nodes.mongo3 | default(false) | bool }}"
+          control_state: "{{ mongo_tls_control_state_nodes.mongo3 | default('none') }}"
+      replica_set:
+        primary: "{{ mongo_tls_cluster_status.primary | default('') }}"
+        secondaries: "{{ mongo_tls_cluster_status.secondaries | default([]) }}"
+        config_version: "{{ mongo_tls_cluster_status.config.version | default(none) }}"
+      error_reason: "{{ mongo_tls_error_reason | default(none) }}"
+      manual_recovery_notes: "{{ mongo_tls_manual_recovery_notes | default(none) }}"
+
+- name: Escribir archivo de estado logs/tls_rollout_state.json
+  ansible.builtin.copy:
+    dest: "{{ tls_rollout_state_path | default(backup_log_root ~ '/tls_rollout_state.json') }}"
+    mode: "0644"
+    content: "{{ mongo_tls_state_document | to_nice_json }}"

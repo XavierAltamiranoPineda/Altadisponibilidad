@@ -1,0 +1,330 @@
+---
+# ============================================================
+# Verificacion de invariantes de pre-mutacion (ABORTED_PRE_MUTATION)
+#
+# Incluido desde tls_control_volume_setup.yml cuando se detecta
+# un state file de una fase intermedia (ni terminal ni NONE).
+#
+# Si TODAS las invariantes pasan:
+#   phase -> ABORTED_PRE_MUTATION  (auditoria)
+#   decision -> CONTINUE           (el rollout puede reiniciarse limpiamente)
+#
+# Si cualquier invariante falla:
+#   phase -> NEEDS_MANUAL_RECOVERY
+#   falla con mensaje explicito
+#
+# Invariantes comprobadas:
+#   1. Spec mode de los 3 servicios == historical_disabled
+#   2. Version.Index actual == version_index_snapshot en state file
+#   3. version_index_after_update == null en los 3
+#   4. forward_new_task_id vacio en los 3
+#   5. forward_new_container_id vacio en los 3
+#   6. control_state == none en los 3
+#   7. Ningun control volume existe
+#   8. Runtime TLS == disabled en los 3
+#   9. Replica Set saludable (1 PRIMARY + 2 SECONDARY, health=1)
+# ============================================================
+
+- name: PMC — Capturar specs actuales de los 3 servicios
+  ansible.builtin.command:
+    argv: [docker, service, inspect, mongo1, mongo2, mongo3]
+  register: mongo_tls_pmc_inspect_raw
+  changed_when: false
+
+- name: PMC — Preparar lista de inspects para clasificador
+  ansible.builtin.set_fact:
+    mongo_tls_service_inspects: "{{ mongo_tls_pmc_inspect_raw.stdout | from_json }}"
+
+- name: PMC — Clasificar spec mode por servicio
+  ansible.builtin.include_tasks: tls_classify_service_specs.yml
+
+- name: PMC — Extraer Version.Index actuales por servicio
+  ansible.builtin.set_fact:
+    mongo_tls_pmc_version_indexes: >-
+      {{
+        dict(
+          (mongo_tls_pmc_inspect_raw.stdout | from_json) | map(attribute='Spec.Name') | list
+          | zip(
+            (mongo_tls_pmc_inspect_raw.stdout | from_json) | map(attribute='Version.Index') | list
+          )
+        )
+      }}
+
+- name: PMC — Verificar existencia de control volumes
+  ansible.builtin.command:
+    argv:
+      - docker
+      - volume
+      - inspect
+      - "{{ mongo_tls_control_volume_names[item] }}"
+  loop: "{{ mongo_tls_service_names }}"
+  register: mongo_tls_pmc_vol_inspect_raw
+  failed_when: false
+  changed_when: false
+
+- name: PMC — Evaluar si algun control volume existe
+  ansible.builtin.set_fact:
+    mongo_tls_pmc_any_control_volume: >-
+      {{
+        mongo_tls_pmc_vol_inspect_raw.results
+        | selectattr('rc', 'equalto', 0) | list | length > 0
+      }}
+
+- name: PMC — Consultar runtime TLS por nodo
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - "{{ mongo_network }}"
+      - --env
+      - MONGO_ADMIN_USER
+      - --env
+      - MONGO_ADMIN_PASSWORD
+      - "{{ mongo_image }}"
+      - mongosh
+      - --quiet
+      - --nodb
+      - --eval
+      - |
+          const user = process.env.MONGO_ADMIN_USER;
+          const pass = process.env.MONGO_ADMIN_PASSWORD;
+          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@{{ item }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=5000`;
+          try {
+            const db = connect(uri);
+            const opts = db.adminCommand({getCmdLineOpts: 1}).parsed;
+            const tlsMode = (opts.net && opts.net.tls && opts.net.tls.mode) ? opts.net.tls.mode : 'disabled';
+            print('PMC_RUNTIME_JSON=' + JSON.stringify({ node: '{{ item }}', tlsMode: tlsMode }));
+          } catch(e) {
+            print('PMC_RUNTIME_JSON=' + JSON.stringify({ node: '{{ item }}', tlsMode: 'query_failed' }));
+          }
+  environment:
+    MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+    MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+  loop: "{{ mongo_tls_service_names }}"
+  register: mongo_tls_pmc_runtime_raw
+  changed_when: false
+  no_log: true
+
+- name: PMC — Interpretar runtime TLS por nodo
+  ansible.builtin.set_fact:
+    mongo_tls_pmc_runtime_modes: >-
+      {{
+        mongo_tls_pmc_runtime_modes | default({}) | combine({
+          item.item: (
+            (item.stdout_lines
+             | select('match', '^PMC_RUNTIME_JSON=') | first
+             | regex_replace('^PMC_RUNTIME_JSON=', ''))
+            | from_json
+          ).tlsMode
+        })
+      }}
+  loop: "{{ mongo_tls_pmc_runtime_raw.results }}"
+  no_log: true
+
+- name: PMC — Consultar salud del Replica Set
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - "{{ mongo_network }}"
+      - --env
+      - MONGO_ADMIN_USER
+      - --env
+      - MONGO_ADMIN_PASSWORD
+      - "{{ mongo_image }}"
+      - mongosh
+      - --quiet
+      - --nodb
+      - --eval
+      - |
+          const user = process.env.MONGO_ADMIN_USER;
+          const pass = process.env.MONGO_ADMIN_PASSWORD;
+          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&serverSelectionTimeoutMS=5000`;
+          try {
+            const db = connect(uri);
+            const st = db.adminCommand({replSetGetStatus: 1});
+            const m = st.members;
+            const healthy = m.length === 3 &&
+              m.filter(x => x.stateStr === 'PRIMARY' && x.health === 1).length === 1 &&
+              m.filter(x => x.stateStr === 'SECONDARY' && x.health === 1).length === 2;
+            print('PMC_RS_JSON=' + JSON.stringify({ healthy: healthy, set: st.set }));
+          } catch(e) {
+            print('PMC_RS_JSON=' + JSON.stringify({ healthy: false, error: e.message }));
+          }
+  environment:
+    MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+    MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+  register: mongo_tls_pmc_rs_raw
+  changed_when: false
+  no_log: true
+
+- name: PMC — Interpretar salud del Replica Set
+  ansible.builtin.set_fact:
+    mongo_tls_pmc_rs: >-
+      {{
+        (mongo_tls_pmc_rs_raw.stdout_lines
+         | select('match', '^PMC_RS_JSON=') | first
+         | regex_replace('^PMC_RS_JSON=', ''))
+        | from_json
+      }}
+  no_log: true
+
+# ─── Extraer campos relevantes del state file anterior ───────────────────────
+- name: PMC — Extraer campos relevantes del state file para comparacion
+  ansible.builtin.set_fact:
+    mongo_tls_pmc_sf_version_snapshot:
+      mongo1: "{{ mongo_tls_previous_state.services.mongo1.version_index_snapshot | default(none) }}"
+      mongo2: "{{ mongo_tls_previous_state.services.mongo2.version_index_snapshot | default(none) }}"
+      mongo3: "{{ mongo_tls_previous_state.services.mongo3.version_index_snapshot | default(none) }}"
+    mongo_tls_pmc_sf_version_after:
+      mongo1: "{{ mongo_tls_previous_state.services.mongo1.version_index_after_update | default(none) }}"
+      mongo2: "{{ mongo_tls_previous_state.services.mongo2.version_index_after_update | default(none) }}"
+      mongo3: "{{ mongo_tls_previous_state.services.mongo3.version_index_after_update | default(none) }}"
+    mongo_tls_pmc_sf_new_tasks:
+      mongo1: "{{ mongo_tls_previous_state.services.mongo1.forward_new_task_id | default('') }}"
+      mongo2: "{{ mongo_tls_previous_state.services.mongo2.forward_new_task_id | default('') }}"
+      mongo3: "{{ mongo_tls_previous_state.services.mongo3.forward_new_task_id | default('') }}"
+    mongo_tls_pmc_sf_new_containers:
+      mongo1: "{{ mongo_tls_previous_state.services.mongo1.forward_new_container_id | default('') }}"
+      mongo2: "{{ mongo_tls_previous_state.services.mongo2.forward_new_container_id | default('') }}"
+      mongo3: "{{ mongo_tls_previous_state.services.mongo3.forward_new_container_id | default('') }}"
+    mongo_tls_pmc_sf_control_state:
+      mongo1: "{{ mongo_tls_previous_state.services.mongo1.control_state | default('none') }}"
+      mongo2: "{{ mongo_tls_previous_state.services.mongo2.control_state | default('none') }}"
+      mongo3: "{{ mongo_tls_previous_state.services.mongo3.control_state | default('none') }}"
+
+# ─── Evaluar las 9 invariantes ───────────────────────────────────────────────
+- name: PMC — Evaluar invariantes de pre-mutacion
+  ansible.builtin.set_fact:
+    mongo_tls_pmc_specs_ok: >-
+      {{
+        mongo_tls_classified_spec_modes.values() | list | sort == ['historical_disabled', 'historical_disabled', 'historical_disabled']
+      }}
+    mongo_tls_pmc_versions_ok: >-
+      {{
+        (mongo_tls_pmc_sf_version_snapshot.mongo1 is not none) and
+        (mongo_tls_pmc_sf_version_snapshot.mongo2 is not none) and
+        (mongo_tls_pmc_sf_version_snapshot.mongo3 is not none) and
+        (mongo_tls_pmc_version_indexes.mongo1 | int == mongo_tls_pmc_sf_version_snapshot.mongo1 | int) and
+        (mongo_tls_pmc_version_indexes.mongo2 | int == mongo_tls_pmc_sf_version_snapshot.mongo2 | int) and
+        (mongo_tls_pmc_version_indexes.mongo3 | int == mongo_tls_pmc_sf_version_snapshot.mongo3 | int)
+      }}
+    mongo_tls_pmc_after_update_ok: >-
+      {{
+        mongo_tls_pmc_sf_version_after.mongo1 is none and
+        mongo_tls_pmc_sf_version_after.mongo2 is none and
+        mongo_tls_pmc_sf_version_after.mongo3 is none
+      }}
+    mongo_tls_pmc_new_tasks_ok: >-
+      {{
+        mongo_tls_pmc_sf_new_tasks.mongo1 == '' and
+        mongo_tls_pmc_sf_new_tasks.mongo2 == '' and
+        mongo_tls_pmc_sf_new_tasks.mongo3 == ''
+      }}
+    mongo_tls_pmc_new_containers_ok: >-
+      {{
+        mongo_tls_pmc_sf_new_containers.mongo1 == '' and
+        mongo_tls_pmc_sf_new_containers.mongo2 == '' and
+        mongo_tls_pmc_sf_new_containers.mongo3 == ''
+      }}
+    mongo_tls_pmc_control_state_ok: >-
+      {{
+        mongo_tls_pmc_sf_control_state.mongo1 == 'none' and
+        mongo_tls_pmc_sf_control_state.mongo2 == 'none' and
+        mongo_tls_pmc_sf_control_state.mongo3 == 'none'
+      }}
+    mongo_tls_pmc_no_volumes_ok: >-
+      {{ not (mongo_tls_pmc_any_control_volume | bool) }}
+    mongo_tls_pmc_runtime_ok: >-
+      {{
+        mongo_tls_pmc_runtime_modes.mongo1 | default('unknown') == 'disabled' and
+        mongo_tls_pmc_runtime_modes.mongo2 | default('unknown') == 'disabled' and
+        mongo_tls_pmc_runtime_modes.mongo3 | default('unknown') == 'disabled'
+      }}
+    mongo_tls_pmc_rs_ok: >-
+      {{ mongo_tls_pmc_rs.healthy | bool }}
+
+- name: PMC — Calcular resultado final de invariantes
+  ansible.builtin.set_fact:
+    mongo_tls_pmc_all_pass: >-
+      {{
+        mongo_tls_pmc_specs_ok | bool and
+        mongo_tls_pmc_versions_ok | bool and
+        mongo_tls_pmc_after_update_ok | bool and
+        mongo_tls_pmc_new_tasks_ok | bool and
+        mongo_tls_pmc_new_containers_ok | bool and
+        mongo_tls_pmc_control_state_ok | bool and
+        mongo_tls_pmc_no_volumes_ok | bool and
+        mongo_tls_pmc_runtime_ok | bool and
+        mongo_tls_pmc_rs_ok | bool
+      }}
+
+- name: PMC — Mostrar diagnostico de invariantes
+  ansible.builtin.debug:
+    msg:
+      previous_phase: "{{ mongo_tls_previous_state.phase }}"
+      inv_spec_modes: "{{ mongo_tls_pmc_specs_ok }} — {{ mongo_tls_classified_spec_modes }}"
+      inv_version_indexes: "{{ mongo_tls_pmc_versions_ok }} — snapshot={{ mongo_tls_pmc_sf_version_snapshot }} current={{ mongo_tls_pmc_version_indexes }}"
+      inv_after_update_null: "{{ mongo_tls_pmc_after_update_ok }} — {{ mongo_tls_pmc_sf_version_after }}"
+      inv_new_tasks_empty: "{{ mongo_tls_pmc_new_tasks_ok }} — {{ mongo_tls_pmc_sf_new_tasks }}"
+      inv_new_containers_empty: "{{ mongo_tls_pmc_new_containers_ok }} — {{ mongo_tls_pmc_sf_new_containers }}"
+      inv_control_state_none: "{{ mongo_tls_pmc_control_state_ok }} — {{ mongo_tls_pmc_sf_control_state }}"
+      inv_no_control_volumes: "{{ mongo_tls_pmc_no_volumes_ok }}"
+      inv_runtime_disabled: "{{ mongo_tls_pmc_runtime_ok }} — {{ mongo_tls_pmc_runtime_modes }}"
+      inv_rs_healthy: "{{ mongo_tls_pmc_rs_ok }} — {{ mongo_tls_pmc_rs }}"
+      result: "{{ 'ALL_PASS' if mongo_tls_pmc_all_pass | bool else 'FAILED' }}"
+
+# ─── Rama: ABORTED_PRE_MUTATION — todas las invariantes pasaron ──────────────
+- name: PMC — Registrar ABORTED_PRE_MUTATION y permitir nuevo rollout
+  when: mongo_tls_pmc_all_pass | bool
+  block:
+    - name: PMC — Marcar fase ABORTED_PRE_MUTATION
+      ansible.builtin.set_fact:
+        mongo_tls_current_phase: "ABORTED_PRE_MUTATION"
+        mongo_tls_precheck_decision: "CONTINUE"
+        mongo_tls_error_reason: "PREVIOUS_RUN_FAILED_BEFORE_FIRST_RUNTIME_MUTATION"
+        mongo_tls_needs_manual_recovery: false
+
+    - name: PMC — Persistir ABORTED_PRE_MUTATION en state file para auditoria
+      ansible.builtin.include_tasks: tls_state_file.yml
+
+    - name: PMC — Confirmar reinicio limpio de rollout
+      ansible.builtin.debug:
+        msg: >
+          ABORTED_PRE_MUTATION confirmado. El intento anterior termino antes de
+          cualquier mutacion de runtime. Iniciando nuevo rollout desde cero.
+
+# ─── Rama: invariantes fallidas — posible mutacion parcial ───────────────────
+- name: PMC — Abortar por fallo de invariantes (posible mutacion no verificada)
+  when: not (mongo_tls_pmc_all_pass | bool)
+  block:
+    - name: PMC — Marcar NEEDS_MANUAL_RECOVERY
+      ansible.builtin.set_fact:
+        mongo_tls_current_phase: "NEEDS_MANUAL_RECOVERY"
+        mongo_tls_needs_manual_recovery: true
+        mongo_tls_error_reason: >-
+          PRE_MUTATION_CHECK_FAILED:
+          specs_ok={{ mongo_tls_pmc_specs_ok }},
+          versions_ok={{ mongo_tls_pmc_versions_ok }},
+          after_update_null={{ mongo_tls_pmc_after_update_ok }},
+          new_tasks_empty={{ mongo_tls_pmc_new_tasks_ok }},
+          new_containers_empty={{ mongo_tls_pmc_new_containers_ok }},
+          control_state_none={{ mongo_tls_pmc_control_state_ok }},
+          no_volumes={{ mongo_tls_pmc_no_volumes_ok }},
+          runtime_disabled={{ mongo_tls_pmc_runtime_ok }},
+          rs_healthy={{ mongo_tls_pmc_rs_ok }}
+
+    - name: PMC — Persistir NEEDS_MANUAL_RECOVERY en state file
+      ansible.builtin.include_tasks: tls_state_file.yml
+
+    - name: PMC — Abortar con diagnostico completo
+      ansible.builtin.fail:
+        msg: >
+          PRE_MUTATION_CHECK_FAILED: No todas las invariantes de pre-mutacion se cumplen.
+          No se puede demostrar que el intento anterior no muato ningun servicio.
+          Usar force_recovery=true si el cluster requiere recuperacion controlada.
+          Consultar logs/tls_rollout_state.json para diagnostico completo.

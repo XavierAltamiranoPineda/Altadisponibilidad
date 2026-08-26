@@ -4,6 +4,10 @@
   connection: local
   gather_facts: false
 
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/{{ target_environment | default('local') }}.yml"
+
   vars:
     mongo_image: "mongo:7-jammy"
     mongo_network: "mongo_swarm_net"
@@ -67,6 +71,10 @@
         fail_msg: "El Docker Secret {{ mongo_secret }} no existe."
         success_msg: "Docker Secret {{ mongo_secret }} disponible."
 
+    - name: Preparar definición runtime TLS futura
+      ansible.builtin.include_tasks: tasks/tls_runtime_facts.yml
+      when: mongo_tls_enabled | bool
+
     # ============================================================
     # 4. VERIFICAR SERVICIO EXISTENTE
     # ============================================================
@@ -99,22 +107,32 @@
 
     - name: Crear servicio mongo1
       ansible.builtin.command:
-        cmd: >
-          docker service create
-          --name {{ mongo_service }}
-          --network {{ mongo_network }}
-          --publish published=27017,target=27017
-          --secret source={{ mongo_secret }},target=mongo_keyfile
-          --mount type=volume,source={{ mongo_volume }},target=/data/db
-          {{ mongo_image }}
-          sh -c
-          "cp /run/secrets/mongo_keyfile {{ mongo_keyfile_path }} &&
-          chmod 400 {{ mongo_keyfile_path }} &&
-          exec mongod
-          --replSet rs0
-          --auth
-          --keyFile {{ mongo_keyfile_path }}
-          --bind_ip_all"
+        argv: >-
+          {{
+            ['docker', 'service', 'create',
+             '--name', mongo_service,
+             '--network', mongo_network,
+             '--publish', 'published=27017,target=27017',
+             '--secret', 'source=' ~ mongo_secret ~ ',target=mongo_keyfile',
+             '--mount', 'type=volume,source=' ~ mongo_volume ~ ',target=/data/db',
+             '--update-order', 'stop-first',
+             '--update-parallelism', '1']
+            +
+            (['--secret', 'source=mongo_tls_ca_' ~ mongo_tls_ca_secret_version ~ ',target=mongo_tls_ca,mode=0444',
+              '--secret', 'source=' ~ mongo_service ~ '_tls_pem_' ~ mongo_tls_node_secret_version ~ ',target=mongo_tls_node_pem,mode=0400',
+              '--mount', 'type=tmpfs,target=' ~ mongo_tls_runtime_dir ~ ',tmpfs-size=1048576,tmpfs-mode=0700',
+              '--entrypoint', '/bin/sh']
+             if mongo_tls_enabled | bool else [])
+            + [mongo_image]
+            +
+            (mongo_tls_runtime_argv
+             if mongo_tls_enabled | bool
+             else ['sh', '-c',
+                   'cp /run/secrets/mongo_keyfile ' ~ mongo_keyfile_path ~
+                   ' && chmod 400 ' ~ mongo_keyfile_path ~
+                   ' && exec mongod --replSet ' ~ mongo_replica_set ~
+                   ' --auth --keyFile ' ~ mongo_keyfile_path ~ ' --bind_ip_all'])
+          }}
       register: mongo1_create
       changed_when: mongo1_create.rc == 0
 
@@ -185,4 +203,3 @@
           - "Volumen: {{ mongo_volume }}"
           - ""
           - "============================================================"
-

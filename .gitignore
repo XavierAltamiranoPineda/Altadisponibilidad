@@ -18,3 +18,12 @@ __pycache__/
 Thumbs.db
 .vscode/
 .idea/
+
+# Agents
+agents/*
+.agents/*
+
+# Runtime logs / TLS rollout state
+logs/*.lock
+logs/tls_rollout_state.json
+logs/tls_update_spec_*.json

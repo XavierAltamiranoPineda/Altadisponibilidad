@@ -1,0 +1,38 @@
+---
+- name: Ejecutar autenticacion MongoDB sin secretos en argv
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - '{{ mongo_network }}'
+      - --env
+      - MONGO_ADMIN_USER
+      - --env
+      - MONGO_ADMIN_PASSWORD
+      - --env
+      - MONGO_ADMIN_URI
+      - '{{ mongo_image }}'
+      - mongosh
+      - --quiet
+      - --nodb
+    stdin: '{{ mongo_admin_auth_script }}'
+    stdin_add_newline: true
+  environment:
+    MONGO_ADMIN_USER: '{{ mongo_admin_user }}'
+    MONGO_ADMIN_PASSWORD: '{{ mongo_admin_auth_password }}'
+    MONGO_ADMIN_URI: '{{ mongo_admin_mongosh_uri }}'
+  register: mongo_admin_auth_check_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Registrar resultado seguro de autenticacion
+  ansible.builtin.set_fact:
+    mongo_admin_auth_check_ok: >-
+      {{
+        mongo_admin_auth_check_result.rc == 0
+        and 'ADMIN_AUTH_OK' in mongo_admin_auth_check_result.stdout
+      }}
+  no_log: true

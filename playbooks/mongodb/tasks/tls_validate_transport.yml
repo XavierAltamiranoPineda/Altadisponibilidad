@@ -1,0 +1,45 @@
+---
+- name: Probar TLS con CA y hostname validos en {{ mongo_tls_validation_node }}
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - "{{ mongo_network }}"
+      - --mount
+      - "type=bind,source={{ mongo_tls_ca_canonical }},target=/run/tls-validation/mongo_ca.pem,readonly"
+      - "{{ mongo_image }}"
+      - mongosh
+      - --quiet
+      - "mongodb://{{ mongo_tls_validation_node }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=10000"
+      - --tls
+      - --tlsCAFile
+      - /run/tls-validation/mongo_ca.pem
+      - --eval
+      - "const r=db.runCommand({ping:1}); if(r.ok!==1) quit(42); print('TLS_OK')"
+  register: mongo_tls_probe
+  changed_when: false
+  retries: 10
+  delay: 3
+  until: mongo_tls_probe.rc == 0 and 'TLS_OK' in mongo_tls_probe.stdout
+
+- name: Probar plaintext permitido en {{ mongo_tls_validation_node }}
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - "{{ mongo_network }}"
+      - "{{ mongo_image }}"
+      - mongosh
+      - --quiet
+      - "mongodb://{{ mongo_tls_validation_node }}:27017/admin?directConnection=true&tls=false&serverSelectionTimeoutMS=10000"
+      - --eval
+      - "const r=db.runCommand({ping:1}); if(r.ok!==1) quit(42); print('PLAINTEXT_OK')"
+  register: mongo_plaintext_probe
+  changed_when: false
+  retries: 10
+  delay: 3
+  until: mongo_plaintext_probe.rc == 0 and 'PLAINTEXT_OK' in mongo_plaintext_probe.stdout

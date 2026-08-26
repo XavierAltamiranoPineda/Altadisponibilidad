@@ -5,6 +5,23 @@
 
 environment_name: "development"
 
+# ============================================================
+# TLS DESARROLLO - PKI PROPORCIONADA POR INFRAESTRUCTURA
+# ============================================================
+
+mongo_tls_enabled: "{{ development_mongo_tls_enabled }}"
+mongo_tls_clients_enabled: "{{ development_mongo_tls_clients_enabled }}"
+mongo_tls_target_mode: "{{ development_mongo_tls_target_mode }}"
+mongo_tls_deployment_mode: "{{ development_mongo_tls_deployment_mode }}"
+
+mongo_tls_provisioning_source: "pki_provided"
+mongo_tls_secret_version: "{{ development_mongo_tls_secret_version }}"
+mongo_tls_ca_secret_version: "{{ development_mongo_tls_ca_secret_version }}"
+mongo_tls_node_secret_version: "{{ development_mongo_tls_node_secret_version }}"
+
+mongo_tls_ca_cert_path: "{{ development_mongo_tls_ca_cert_path }}"
+mongo_tls_nodes_certificates: "{{ development_mongo_tls_nodes_certificates }}"
+
 # Estos valores deben ser definidos por infraestructura
 mongo_database: "{{ development_mongo_database }}"
 

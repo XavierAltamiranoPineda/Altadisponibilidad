@@ -6,6 +6,8 @@
   gather_facts: false
 
   vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/{{ target_environment | default('local') }}.yml"
     - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
 
   vars:
@@ -60,23 +62,40 @@
     # 3. LEVANTAR MONGO TEMPORALMENTE SIN --auth
     # ============================================================
 
+    - name: Preparar definición runtime TLS temporal
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../mongodb/tasks/tls_runtime_facts.yml"
+      vars:
+        mongo_tls_runtime_auth_enabled: false
+      when: mongo_tls_enabled | bool
+
     - name: Crear MongoDB temporal sin autenticación
       ansible.builtin.command:
-        cmd: >
-          docker service create
-          --name {{ mongo_service }}
-          --network {{ mongo_network }}
-          --publish published=27017,target=27017
-          --secret source={{ mongo_secret }},target=mongo_keyfile
-          --mount type=volume,source={{ mongo_volume }},target=/data/db
-          {{ mongo_image }}
-          sh -c
-          "cp /run/secrets/mongo_keyfile {{ mongo_keyfile_path }} &&
-          chmod 400 {{ mongo_keyfile_path }} &&
-          exec mongod
-          --replSet rs0
-          --keyFile {{ mongo_keyfile_path }}
-          --bind_ip_all"
+        argv: >-
+          {{
+            ['docker', 'service', 'create',
+             '--name', mongo_service,
+             '--network', mongo_network,
+             '--publish', 'published=27017,target=27017',
+             '--secret', 'source=' ~ mongo_secret ~ ',target=mongo_keyfile',
+             '--mount', 'type=volume,source=' ~ mongo_volume ~ ',target=/data/db',
+             '--update-order', 'stop-first',
+             '--update-parallelism', '1']
+            +
+            (['--secret', 'source=mongo_tls_ca_' ~ mongo_tls_ca_secret_version ~ ',target=mongo_tls_ca,mode=0444',
+              '--secret', 'source=' ~ mongo_service ~ '_tls_pem_' ~ mongo_tls_node_secret_version ~ ',target=mongo_tls_node_pem,mode=0400',
+              '--mount', 'type=tmpfs,target=' ~ mongo_tls_runtime_dir ~ ',tmpfs-size=1048576,tmpfs-mode=0700',
+              '--entrypoint', '/bin/sh']
+             if mongo_tls_enabled | bool else [])
+            + [mongo_image]
+            +
+            (mongo_tls_runtime_argv
+             if mongo_tls_enabled | bool
+             else ['sh', '-c',
+                   'cp /run/secrets/mongo_keyfile ' ~ mongo_keyfile_path ~
+                   ' && chmod 400 ' ~ mongo_keyfile_path ~
+                   ' && exec mongod --replSet ' ~ mongo_replica_set ~
+                   ' --keyFile ' ~ mongo_keyfile_path ~ ' --bind_ip_all'])
+          }}
       register: mongo_temp_create
       changed_when: true
 
@@ -158,24 +177,40 @@
     # 7. LEVANTAR MONGODB DEFINITIVO CON AUTH
     # ============================================================
 
+    - name: Preparar definición runtime TLS definitiva
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../mongodb/tasks/tls_runtime_facts.yml"
+      vars:
+        mongo_tls_runtime_auth_enabled: true
+      when: mongo_tls_enabled | bool
+
     - name: Crear MongoDB definitivo con autenticación
       ansible.builtin.command:
-        cmd: >
-          docker service create
-          --name {{ mongo_service }}
-          --network {{ mongo_network }}
-          --publish published=27017,target=27017
-          --secret source={{ mongo_secret }},target=mongo_keyfile
-          --mount type=volume,source={{ mongo_volume }},target=/data/db
-          {{ mongo_image }}
-          sh -c
-          "cp /run/secrets/mongo_keyfile {{ mongo_keyfile_path }} &&
-          chmod 400 {{ mongo_keyfile_path }} &&
-          exec mongod
-          --replSet rs0
-          --auth
-          --keyFile {{ mongo_keyfile_path }}
-          --bind_ip_all"
+        argv: >-
+          {{
+            ['docker', 'service', 'create',
+             '--name', mongo_service,
+             '--network', mongo_network,
+             '--publish', 'published=27017,target=27017',
+             '--secret', 'source=' ~ mongo_secret ~ ',target=mongo_keyfile',
+             '--mount', 'type=volume,source=' ~ mongo_volume ~ ',target=/data/db',
+             '--update-order', 'stop-first',
+             '--update-parallelism', '1']
+            +
+            (['--secret', 'source=mongo_tls_ca_' ~ mongo_tls_ca_secret_version ~ ',target=mongo_tls_ca,mode=0444',
+              '--secret', 'source=' ~ mongo_service ~ '_tls_pem_' ~ mongo_tls_node_secret_version ~ ',target=mongo_tls_node_pem,mode=0400',
+              '--mount', 'type=tmpfs,target=' ~ mongo_tls_runtime_dir ~ ',tmpfs-size=1048576,tmpfs-mode=0700',
+              '--entrypoint', '/bin/sh']
+             if mongo_tls_enabled | bool else [])
+            + [mongo_image]
+            +
+            (mongo_tls_runtime_argv
+             if mongo_tls_enabled | bool
+             else ['sh', '-c',
+                   'cp /run/secrets/mongo_keyfile ' ~ mongo_keyfile_path ~
+                   ' && chmod 400 ' ~ mongo_keyfile_path ~
+                   ' && exec mongod --replSet ' ~ mongo_replica_set ~
+                   ' --auth --keyFile ' ~ mongo_keyfile_path ~ ' --bind_ip_all'])
+          }}
       register: mongo_final_create
       changed_when: true
 
@@ -257,4 +292,3 @@
           - "[OK] MongoDB ejecutándose con --auth"
           - ""
           - "============================================================"
-
