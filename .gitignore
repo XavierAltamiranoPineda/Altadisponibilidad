@@ -27,3 +27,8 @@ agents/*
 logs/*.lock
 logs/tls_rollout_state.json
 logs/tls_update_spec_*.json
+
+# Documentation and media
+PAS-EST-XXX_Implementacion_Respaldos_MongoDB-v2.md
+docs/PAS-EST-XXX_Implementacion_Respaldos_MongoDB-v2_media/
+skills-lock.json
