@@ -111,45 +111,49 @@
   ansible.builtin.set_fact:
     restore_runner_name: "mongo_restore_runner_{{ restore_runner_timestamp.stdout | trim }}"
 
+- name: Validar checksum SHA-256 antes de descifrar y restaurar
+  ansible.builtin.shell: |
+    cd "{{ backup_file_path | dirname }}"
+    sha256sum -c "{{ backup_filename }}.sha256"
+  register: restore_checksum_validation
+  changed_when: false
+
+- name: Exigir integridad SHA-256 valida antes de restaurar
+  ansible.builtin.assert:
+    that:
+      - restore_checksum_validation.rc == 0
+    fail_msg: "[ERROR] Fallo la verificacion SHA-256 del archivo de respaldo previo a la restauracion."
+
 - name: Ejecutar mongorestore con contenedor temporal HA y garantia de limpieza
   block:
-    - name: Restaurar respaldo en base temporal via red overlay HA
-      ansible.builtin.command:
-        argv:
-          - docker
-          - run
-          - --rm
-          - --name
-          - "{{ restore_runner_name }}"
-          - --network
-          - "{{ mongo_backup_network }}"
-          - --env
-          - MONGO_RESTORE_USER
-          - --env
-          - MONGO_RESTORE_PASSWORD
-          - -v
-          - "{{ backup_file_path | dirname }}:/backup:ro"
-          - -v
-          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
-          - "{{ mongo_backup_tools_image }}"
-          - sh
-          - -ec
-          - |
-            umask 077
-            CFG_FILE="$(mktemp /tmp/mongorestore_cfg.XXXXXX)"
-            trap 'rm -f "$CFG_FILE"' EXIT INT TERM
-            printf 'password: |-\n  %s\n' "$MONGO_RESTORE_PASSWORD" > "$CFG_FILE"
-            chmod 0600 "$CFG_FILE"
-            mongorestore \
-              --config="$CFG_FILE" \
-              --uri="{{ mongo_backup_uri }}" \
-              --sslCAFile="{{ mongo_tls_client_ca_file }}" \
-              --username="$MONGO_RESTORE_USER" \
-              --authenticationDatabase=admin \
-              --gzip \
-              --archive="/backup/{{ backup_filename }}" \
-              --nsFrom="{{ mongo_database }}.*" \
-              --nsTo="{{ restore_test_database }}.*"
+    - name: Restaurar respaldo via red overlay HA
+      ansible.builtin.shell: |
+        set -euo pipefail
+        umask 077
+        CFG_FILE="$(mktemp /tmp/mongorestore_cfg.XXXXXX)"
+        trap 'rm -f "$CFG_FILE"' EXIT INT TERM
+        printf 'password: |-\n  %s\n' "$MONGO_RESTORE_PASSWORD" > "$CFG_FILE"
+        chmod 0600 "$CFG_FILE"
+
+        cat "{{ backup_file_path }}" | \
+        docker run --rm -i \
+          --name "{{ restore_runner_name }}" \
+          --network "{{ mongo_backup_network }}" \
+          --env MONGO_RESTORE_USER \
+          --env MONGO_RESTORE_PASSWORD \
+          -v "$CFG_FILE:$CFG_FILE:ro" \
+          -v "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro" \
+          "{{ mongo_backup_tools_image }}" \
+          mongorestore \
+            --config="$CFG_FILE" \
+            --uri="{{ mongo_backup_uri }}" \
+            --sslCAFile="{{ mongo_tls_client_ca_file }}" \
+            --username="$MONGO_RESTORE_USER" \
+            --authenticationDatabase=admin \
+            --gzip \
+            --archive \
+            --nsFrom="{{ mongo_database }}.*" \
+            --nsTo="{{ restore_test_database }}.*"
       environment:
         MONGO_RESTORE_USER: "{{ mongo_restore_user }}"
         MONGO_RESTORE_PASSWORD: "{{ mongo_restore_password }}"

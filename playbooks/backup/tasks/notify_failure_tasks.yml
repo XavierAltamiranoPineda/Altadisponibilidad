@@ -16,11 +16,23 @@
          | regex_replace(mongo_backup_password | default('') | regex_escape, '[REDACTED]')
          | regex_replace(mongo_admin_password | default('') | regex_escape, '[REDACTED]')
          | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
-         | regex_replace('[
-	|]', ' ')
+         | regex_replace('[\n\r\t|]+', ' ')
          | trim)
       }}
   no_log: true
+
+- name: Calcular duracion transcurrida antes del fallo
+  ansible.builtin.shell: |
+    now=$(date +%s)
+    start={{ backup_start_epoch.stdout | default(0) }}
+    if [ "$start" -gt 0 ] && [ "$now" -ge "$start" ]; then
+      echo $((now - start))
+    else
+      echo 0
+    fi
+  register: backup_fail_duration_raw
+  changed_when: false
+  ignore_errors: true
 
 - name: Registrar estado FAILED en la bitacora de auditoria
   ansible.builtin.lineinfile:
@@ -32,6 +44,7 @@
       {{ backup_timestamp | default(ansible_date_time.iso8601_basic_short | default('UNKNOWN')) }}
       | environment={{ environment_name | default('local') }}
       | database={{ mongo_database | default('unknown') }}
+      | duration_seconds={{ backup_fail_duration_raw.stdout | default('0') | trim }}
       | result=FAILED
       | reason={{ sanitized_failure_reason }}
   ignore_errors: true

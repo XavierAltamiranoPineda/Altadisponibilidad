@@ -6,9 +6,11 @@ Verifies:
 2. Notifier is invoked ONLY in FAILED/rescue routes, never in SUCCESS routes.
 3. No passwords or secrets are passed in notifier argv.
 4. Alerts log is created with 0600 permissions.
+5. notify_failure_tasks.yml parses as valid YAML without invalid tabs or literal breaks.
+6. Sanitization cleans newlines, carriage returns, tabs, and pipe characters.
 """
 
-import os, unittest
+import os, unittest, yaml
 
 REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if not os.path.isdir(os.path.join(REPO, 'playbooks')):
@@ -35,11 +37,9 @@ class TestBackupNotificationStatic(unittest.TestCase):
         with open(backup_run_path) as f:
             content = f.read()
 
-        # Should be called in rescue: block
         self.assertIn('rescue:', content, "Missing rescue: block in backup_run.yml")
         self.assertIn('tasks/notify_failure_tasks.yml', content, "Missing notify_failure_tasks in backup_run.yml")
 
-        # In notify_failure_tasks.yml, result is FAILED and never SUCCESS
         notify_task_path = os.path.join(REPO, 'playbooks/backup/tasks/notify_failure_tasks.yml')
         with open(notify_task_path) as f:
             notify_content = f.read()
@@ -57,6 +57,17 @@ class TestBackupNotificationStatic(unittest.TestCase):
         self.assertNotIn('mongo_admin_password', content.split('notify_backup_failure.sh')[1],
                          "Password passed in notifier argv!")
         self.assertIn('sanitized_failure_reason', content, "Reason must be sanitized before invoking notifier")
+
+    def test_notify_failure_tasks_valid_yaml_and_sanitization(self):
+        """Ensures notify_failure_tasks.yml parses cleanly as valid YAML and sanitizes control characters"""
+        notify_task_path = os.path.join(REPO, 'playbooks/backup/tasks/notify_failure_tasks.yml')
+        with open(notify_task_path) as f:
+            content = f.read()
+
+        # Parse with PyYAML to ensure zero tab errors or YAML syntax issues
+        parsed = yaml.safe_load(content)
+        self.assertIsInstance(parsed, list, "notify_failure_tasks.yml must be a valid Ansible task list")
+        self.assertIn('[\\n\\r\\t|]+', content, "Must sanitize newlines, tabs, and pipes safely without breaking YAML")
 
 
 if __name__ == '__main__':

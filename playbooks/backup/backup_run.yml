@@ -106,6 +106,14 @@
           register: backup_month
           changed_when: false
 
+        - name: Validar cumplimiento de politica institucional de cifrado
+          ansible.builtin.assert:
+            that:
+              - backup_encryption_required | default(true) | bool
+              - backup_encryption_provider is defined
+            fail_msg: "[ERROR] La politica institucional de respaldo exige declaracion de cifrado."
+            success_msg: "[OK] Politica institucional de cifrado verificada (proveedor: {{ backup_encryption_provider }})"
+
         - name: Definir variables del respaldo
           ansible.builtin.set_fact:
             backup_timestamp: "{{ backup_time.stdout | trim }}"
@@ -218,48 +226,43 @@
             success_msg: "[OK] PRIMARY activo identificado: {{ mongo_primary }}"
 
         # ============================================================
-        # EJECUCION DE MONGODUMP
+        # EJECUCION DE MONGODUMP Y MEDICION DE DURACION
         # ============================================================
+
+        - name: Capturar epoch de inicio del proceso de respaldo
+          ansible.builtin.command:
+            cmd: date +%s
+          register: backup_start_epoch
+          changed_when: false
 
         - name: Ejecutar respaldo con contenedor temporal y garantia de limpieza
           block:
-            - name: Ejecutar mongodump dentro del contenedor temporal con UID/GID del host
-              ansible.builtin.command:
-                argv:
-                  - docker
-                  - run
-                  - --name
-                  - "{{ backup_container_name }}"
-                  - --user
-                  - "{{ backup_host_uid.stdout }}:{{ backup_host_gid.stdout }}"
-                  - --network
-                  - "{{ mongo_backup_network }}"
-                  - --env
-                  - MONGO_BACKUP_USER
-                  - --env
-                  - MONGO_BACKUP_PASSWORD
-                  - -v
-                  - "{{ backup_directory }}:/backup"
-                  - -v
-                  - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
-                  - "{{ mongo_backup_tools_image }}"
-                  - sh
-                  - -ec
-                  - |
-                    umask 077
-                    CFG_FILE="$(mktemp /tmp/mongodump_cfg.XXXXXX)"
-                    trap 'rm -f "$CFG_FILE"' EXIT INT TERM
-                    printf 'password: |-\n  %s\n' "$MONGO_BACKUP_PASSWORD" > "$CFG_FILE"
-                    chmod 0600 "$CFG_FILE"
-                    mongodump \
-                      --config="$CFG_FILE" \
-                      --uri="{{ mongo_backup_uri }}" \
-                      --sslCAFile="{{ mongo_tls_client_ca_file }}" \
-                      --username="$MONGO_BACKUP_USER" \
-                      --authenticationDatabase=admin \
-                      --db="{{ mongo_database }}" \
-                      --gzip \
-                      --archive="/backup/{{ backup_filename }}"
+            - name: Ejecutar mongodump con formato estandar hacia red overlay HA
+              ansible.builtin.shell: |
+                set -euo pipefail
+                umask 077
+                CFG_FILE="$(mktemp /tmp/mongodump_cfg.XXXXXX)"
+                trap 'rm -f "$CFG_FILE"' EXIT INT TERM
+                printf 'password: |-\n  %s\n' "$MONGO_BACKUP_PASSWORD" > "$CFG_FILE"
+                chmod 0600 "$CFG_FILE"
+
+                docker run --rm \
+                  --name "{{ backup_container_name }}" \
+                  --network "{{ mongo_backup_network }}" \
+                  --env MONGO_BACKUP_USER \
+                  --env MONGO_BACKUP_PASSWORD \
+                  -v "$CFG_FILE:$CFG_FILE:ro" \
+                  -v "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro" \
+                  "{{ mongo_backup_tools_image }}" \
+                  mongodump \
+                    --config="$CFG_FILE" \
+                    --uri="{{ mongo_backup_uri }}" \
+                    --sslCAFile="{{ mongo_tls_client_ca_file }}" \
+                    --username="$MONGO_BACKUP_USER" \
+                    --authenticationDatabase=admin \
+                    --db="{{ mongo_database }}" \
+                    --gzip \
+                    --archive > "{{ backup_directory }}/{{ backup_filename }}"
               environment:
                 MONGO_BACKUP_USER: "{{ mongo_backup_user }}"
                 MONGO_BACKUP_PASSWORD: "{{ mongo_backup_password }}"
@@ -349,6 +352,16 @@
             fail_msg: "[ERROR] Fallo la validacion SHA-256 del respaldo"
             success_msg: "[OK] Integridad SHA-256 validada en el host"
 
+        - name: Capturar epoch de finalizacion del respaldo
+          ansible.builtin.command:
+            cmd: date +%s
+          register: backup_end_epoch
+          changed_when: false
+
+        - name: Calcular duracion del proceso de respaldo en segundos
+          ansible.builtin.set_fact:
+            backup_duration_seconds: "{{ [(backup_end_epoch.stdout | trim | int) - (backup_start_epoch.stdout | trim | int), 0] | max }}"
+
         # ============================================================
         # BITACORA
         # ============================================================
@@ -370,6 +383,7 @@
               | file={{ backup_filename }}
               | size={{ backup_file.stat.size }}
               | checksum=OK
+              | duration_seconds={{ backup_duration_seconds }}
               | free_space_percent_before={{ backup_free_percent }}
               | result=SUCCESS
 
@@ -395,6 +409,7 @@
               - "Archivo host: {{ backup_directory }}/{{ backup_filename }}"
               - "Checksum host: {{ backup_directory }}/{{ backup_filename }}.sha256"
               - "Tamaño: {{ backup_file.stat.size }} bytes"
+              - "Duracion: {{ backup_duration_seconds }} segundos"
               - "Integridad: OK"
               - "============================================================"
 

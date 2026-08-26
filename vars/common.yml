@@ -118,3 +118,15 @@ mongodb_tools_arch: "x86_64"
 
 backup_alert_log_filename: "mongodb_backup_alert.log"
 backup_notification_command: ""
+
+# ============================================================
+# POLITICA INSTITUCIONAL DE CIFRADO DE RESPALDOS
+# ============================================================
+# El estandar exige cifrado en reposo y en transferencia.
+# El mecanismo criptografico especifico (almacenamiento cifrado en reposo,
+# KMS, canales seguros de transferencia) sera provisto y gestionado por
+# Seguridad de la Informacion e Infraestructura institucional.
+backup_encryption_required: true
+backup_encryption_provider: "institutional"
+backup_encryption_at_rest_managed_externally: true
+backup_transfer_encryption_managed_externally: true

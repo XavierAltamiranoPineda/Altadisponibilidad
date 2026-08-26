@@ -67,3 +67,7 @@ secrets/vault_password
 # Python runtime
 **/__pycache__/
 *.pyc
+
+# Artefactos legacy de laboratorio de cifrado age
+backups/**/*.archive.gz.age
+backups/**/*.archive.gz.age.sha256

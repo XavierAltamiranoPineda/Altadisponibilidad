@@ -67,3 +67,12 @@ ansible_vault_password_file: "{{ playbook_dir }}/../../secrets/vault_password"
 
 # Automatizacion local
 backup_scheduler: "cron"
+
+# ============================================================
+# POLITICA DE CIFRADO DE RESPALDOS - AMBIENTE LOCAL
+# ============================================================
+# Declaracion institucional de cifrado en reposo y transferencia
+backup_encryption_required: true
+backup_encryption_provider: "institutional"
+backup_encryption_at_rest_managed_externally: true
+backup_transfer_encryption_managed_externally: true

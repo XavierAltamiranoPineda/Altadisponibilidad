@@ -47,6 +47,19 @@
     backup_file_path: "{{ selected_backup_cmd.stdout | trim }}"
     backup_filename: "{{ selected_backup_cmd.stdout | trim | basename }}"
     checksum_file_path: "{{ selected_backup_cmd.stdout | trim }}.sha256"
+    backup_file_format: "formato estandar institucional (.archive.gz)"
+
+- name: Mostrar respaldo seleccionado y formato
+  ansible.builtin.debug:
+    msg:
+      - "============================================================"
+      - "RESPALDO SELECCIONADO PARA RESTAURACION"
+      - "============================================================"
+      - "Ambiente            : {{ environment_name }}"
+      - "Backup seleccionado : {{ backup_filename }}"
+      - "Ruta completa       : {{ backup_file_path }}"
+      - "Formato             : {{ backup_file_format }}"
+      - "============================================================"
 
 - name: Verificar estado del archivo de respaldo en el sistema de archivos
   ansible.builtin.stat:
