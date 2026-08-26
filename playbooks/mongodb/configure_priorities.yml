@@ -5,78 +5,111 @@
   gather_facts: false
 
   vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/{{ target_environment | default('local') }}.yml"
     - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    mongo_network: "mongo_swarm_net"
 
   tasks:
 
-    - name: Obtener contenedor mongo1
-      ansible.builtin.shell:
-        cmd: docker ps -q --filter name=mongo1
-      register: mongo1_container
-      changed_when: false
+    - name: Validar existencia de certificado CA publico
+      ansible.builtin.stat:
+        path: "{{ mongo_tls_ca_cert_path }}"
+      register: mongo_ca_stat
 
-    - name: Validar contenedor mongo1
+    - name: Exigir certificado CA publico
       ansible.builtin.assert:
         that:
-          - mongo1_container.stdout | trim != ""
-        fail_msg: "ERROR: No se encontro mongo1."
-        success_msg: "OK: mongo1 encontrado."
+          - mongo_ca_stat.stat.exists
+          - mongo_ca_stat.stat.isreg
+        fail_msg: "[ERROR] Certificado CA no encontrado: {{ mongo_tls_ca_cert_path }}"
+        success_msg: "[OK] Certificado CA verificado en el host"
 
-    - name: Detectar PRIMARY actual
+    - name: Detectar PRIMARY actual via conexion TLS
       ansible.builtin.command:
-        cmd: >
-          docker exec {{ mongo1_container.stdout | trim }}
-          mongosh --quiet
-          --username {{ mongo_admin_user }}
-          --password {{ mongo_admin_password }}
-          --authenticationDatabase admin
-          --eval "db.hello().primary"
-      register: current_primary
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_ADMIN_USER
+          - --env
+          - MONGO_ADMIN_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const user = process.env.MONGO_ADMIN_USER;
+            const pass = process.env.MONGO_ADMIN_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const db = connect(uri);
+            db.auth(user, pass);
+            print("PRIMARY=" + db.hello().primary);
+      environment:
+        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+      register: current_primary_raw
       changed_when: false
       no_log: true
 
+    - name: Interpretar PRIMARY actual
+      ansible.builtin.set_fact:
+        current_primary: "{{ current_primary_raw.stdout_lines | select('match', '^PRIMARY=') | first | regex_replace('^PRIMARY=', '') }}"
+
     - name: Mostrar PRIMARY actual
       ansible.builtin.debug:
-        msg: "PRIMARY actual: {{ current_primary.stdout | trim }}"
+        msg: "PRIMARY actual: {{ current_primary }}"
 
-    - name: Obtener servicio del PRIMARY
-      ansible.builtin.set_fact:
-        primary_service: "{{ current_primary.stdout | trim | regex_replace(':27017$', '') }}"
-
-    - name: Obtener contenedor del PRIMARY
-      ansible.builtin.shell:
-        cmd: "docker ps -q --filter name={{ primary_service }}"
-      register: primary_container
-      changed_when: false
-
-    - name: Validar contenedor PRIMARY
-      ansible.builtin.assert:
-        that:
-          - primary_container.stdout | trim != ""
-        fail_msg: "ERROR: No se encontro el contenedor del PRIMARY."
-        success_msg: "OK: Contenedor PRIMARY encontrado."
-
-    - name: Configurar prioridades
+    - name: Configurar prioridades del Replica Set via TLS
       ansible.builtin.command:
-        cmd: >
-          docker exec {{ primary_container.stdout | trim }}
-          mongosh --quiet
-          --username {{ mongo_admin_user }}
-          --password {{ mongo_admin_password }}
-          --authenticationDatabase admin
-          --eval "
-          cfg = rs.conf();
-          cfg.members.forEach(function(m) {
-            if (m.host === 'mongo1:27017') {
-              m.priority = 2;
-            } else if (m.host === 'mongo2:27017') {
-              m.priority = 1;
-            } else if (m.host === 'mongo3:27017') {
-              m.priority = 1;
-            }
-          });
-          rs.reconfig(cfg);
-          "
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_ADMIN_USER
+          - --env
+          - MONGO_ADMIN_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const user = process.env.MONGO_ADMIN_USER;
+            const pass = process.env.MONGO_ADMIN_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const db = connect(uri);
+            db.auth(user, pass);
+            const cfg = db.adminCommand({replSetGetConfig: 1}).config;
+            cfg.members.forEach(function(m) {
+              if (m.host === 'mongo1:27017') {
+                m.priority = 2;
+              } else if (m.host === 'mongo2:27017') {
+                m.priority = 1;
+              } else if (m.host === 'mongo3:27017') {
+                m.priority = 1;
+              }
+            });
+            cfg.version += 1;
+            const res = db.adminCommand({replSetReconfig: cfg});
+            if (res.ok !== 1) quit(1);
+            print("RECONFIG_OK");
+      environment:
+        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
       register: priority_config
       changed_when: true
       no_log: true
@@ -85,49 +118,91 @@
       ansible.builtin.pause:
         seconds: 10
 
-    - name: Obtener contenedor mongo1 actualizado
-      ansible.builtin.shell:
-        cmd: docker ps -q --filter name=mongo1
-      register: mongo1_updated_container
-      changed_when: false
-
-    - name: Consultar prioridades configuradas
+    - name: Consultar prioridades configuradas via TLS
       ansible.builtin.command:
-        cmd: >
-          docker exec {{ mongo1_updated_container.stdout | trim }}
-          mongosh --quiet
-          --username {{ mongo_admin_user }}
-          --password {{ mongo_admin_password }}
-          --authenticationDatabase admin
-          --eval "rs.conf().members.map(m => m.host + ' | priority=' + m.priority).join(';')"
-      register: priorities
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_ADMIN_USER
+          - --env
+          - MONGO_ADMIN_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const user = process.env.MONGO_ADMIN_USER;
+            const pass = process.env.MONGO_ADMIN_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const db = connect(uri);
+            db.auth(user, pass);
+            const cfg = db.adminCommand({replSetGetConfig: 1}).config;
+            print("PRIORITIES=" + cfg.members.map(m => m.host + ' | priority=' + m.priority).join(';'));
+      environment:
+        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+      register: priorities_raw
       changed_when: false
       no_log: true
+
+    - name: Interpretar prioridades
+      ansible.builtin.set_fact:
+        priorities: "{{ priorities_raw.stdout_lines | select('match', '^PRIORITIES=') | first | regex_replace('^PRIORITIES=', '') }}"
 
     - name: Validar prioridades
       ansible.builtin.assert:
         that:
-          - "'mongo1:27017 | priority=2' in priorities.stdout"
-          - "'mongo2:27017 | priority=1' in priorities.stdout"
-          - "'mongo3:27017 | priority=1' in priorities.stdout"
+          - "'mongo1:27017 | priority=2' in priorities"
+          - "'mongo2:27017 | priority=1' in priorities"
+          - "'mongo3:27017 | priority=1' in priorities"
         fail_msg: "ERROR: Las prioridades no quedaron correctamente configuradas."
         success_msg: "OK: Prioridades configuradas correctamente."
 
     - name: Esperar que mongo1 sea PRIMARY preferido
       ansible.builtin.command:
-        cmd: >
-          docker exec {{ mongo1_updated_container.stdout | trim }}
-          mongosh --quiet
-          --username {{ mongo_admin_user }}
-          --password {{ mongo_admin_password }}
-          --authenticationDatabase admin
-          --eval "db.hello().primary"
-      register: preferred_primary
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_ADMIN_USER
+          - --env
+          - MONGO_ADMIN_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const user = process.env.MONGO_ADMIN_USER;
+            const pass = process.env.MONGO_ADMIN_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const db = connect(uri);
+            db.auth(user, pass);
+              print("PREFERRED_PRIMARY=" + db.hello().primary);
+            } catch(e) {
+              print("PREFERRED_PRIMARY=none");
+            }
+      environment:
+        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+      register: preferred_primary_raw
       retries: 60
       delay: 3
       until:
-        - preferred_primary.rc == 0
-        - preferred_primary.stdout | trim == "mongo1:27017"
+        - preferred_primary_raw.rc == 0
+        - "'PREFERRED_PRIMARY=mongo1:27017' in preferred_primary_raw.stdout"
       changed_when: false
       no_log: true
 
@@ -135,12 +210,12 @@
       ansible.builtin.debug:
         msg:
           - "============================================================"
-          - "PRIORIDADES REPLICA SET MONGODB V2"
+          - "PRIORIDADES REPLICA SET MONGODB V2 (TLS)"
           - "============================================================"
           - "mongo1: priority=2"
           - "mongo2: priority=1"
           - "mongo3: priority=1"
           - ""
-          - "[OK] PRIMARY preferido: {{ preferred_primary.stdout | trim }}"
+          - "[OK] PRIMARY preferido: mongo1:27017"
           - "[OK] mongo1 configurado con mayor prioridad"
           - "============================================================"

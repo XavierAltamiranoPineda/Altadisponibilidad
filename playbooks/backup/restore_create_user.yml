@@ -1,5 +1,5 @@
 ---
-- name: Crear usuario de restauracion MongoDB
+- name: Crear usuario de restauracion MongoDB (TLS)
   hosts: localhost
   connection: local
   gather_facts: false
@@ -9,188 +9,152 @@
     - "{{ playbook_dir }}/../../vars/local.yml"
     - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
 
+  vars:
+    mongo_network: "mongo_swarm_net"
+
   tasks:
 
-    # ============================================================
-    # LOCALIZAR UN NODO ACTIVO
-    # ============================================================
+    - name: Validar existencia de certificado CA publico
+      ansible.builtin.stat:
+        path: "{{ mongo_tls_ca_cert_path }}"
+      register: mongo_ca_stat
 
-    - name: Buscar un contenedor MongoDB activo
-      ansible.builtin.shell: |
-        for service in mongo1 mongo2 mongo3; do
-          container=$(docker ps \
-            --filter "label=com.docker.swarm.service.name=${service}" \
-            --format '{{"{{"}}.ID{{"}}"}}' | head -n1)
-
-          if [ -n "$container" ]; then
-            echo "$container"
-            exit 0
-          fi
-        done
-        exit 1
-      register: mongo_available_container
-      changed_when: false
-
-    # ============================================================
-    # DETECTAR PRIMARY
-    # ============================================================
-
-    - name: Obtener PRIMARY actual del Replica Set
-      ansible.builtin.shell: |
-        docker exec \
-          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
-          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
-          {{ mongo_available_container.stdout }} \
-          sh -c '
-            mongosh \
-              --quiet \
-              --host 127.0.0.1 \
-              --port 27017 \
-              --username "$MONGO_ADMIN_USER" \
-              --password "$MONGO_ADMIN_PASSWORD" \
-              --authenticationDatabase admin \
-              --eval "db.hello().primary"
-          '
-      register: mongo_primary
-      changed_when: false
-      no_log: true
-
-    - name: Validar PRIMARY
+    - name: Exigir certificado CA publico
       ansible.builtin.assert:
         that:
-          - mongo_primary.stdout | length > 0
-          - "':' in mongo_primary.stdout"
-        fail_msg: "[ERROR] No se pudo detectar el PRIMARY"
-        success_msg: "[OK] PRIMARY detectado"
+          - mongo_ca_stat.stat.exists
+          - mongo_ca_stat.stat.isreg
+        fail_msg: "[ERROR] Certificado CA no encontrado: {{ mongo_tls_ca_cert_path }}"
+        success_msg: "[OK] Certificado CA verificado en el host"
 
-    - name: Obtener servicio correspondiente al PRIMARY
-      ansible.builtin.set_fact:
-        mongo_primary_service: "{{ mongo_primary.stdout.split(':')[0] }}"
-
-    - name: Obtener contenedor del PRIMARY
-      ansible.builtin.shell: |
-        docker ps \
-          --filter "label=com.docker.swarm.service.name={{ mongo_primary_service }}" \
-          --format '{{"{{"}}.ID{{"}}"}}' | head -n1
-      register: mongo_primary_container
-      changed_when: false
-
-    - name: Validar contenedor PRIMARY
-      ansible.builtin.assert:
-        that:
-          - mongo_primary_container.stdout | length > 0
-        fail_msg: "[ERROR] No se encontro el contenedor correspondiente al PRIMARY"
-        success_msg: "[OK] Contenedor PRIMARY localizado"
-
-    # ============================================================
-    # CREAR USUARIO DE RESTORE
-    # ============================================================
-
-    - name: Crear o actualizar usuario de restauracion
-      ansible.builtin.shell: |
-        docker exec \
-          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
-          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
-          -e MONGO_RESTORE_USER='{{ mongo_restore_user }}' \
-          -e MONGO_RESTORE_PASSWORD='{{ mongo_restore_password }}' \
-          {{ mongo_primary_container.stdout }} \
-          sh -c '
-            mongosh \
-              --quiet \
-              --host 127.0.0.1 \
-              --port 27017 \
-              --username "$MONGO_ADMIN_USER" \
-              --password "$MONGO_ADMIN_PASSWORD" \
-              --authenticationDatabase admin \
-              --eval "
-                const adminDB = db.getSiblingDB(\"admin\");
-                const existing = adminDB.getUser(\"$MONGO_RESTORE_USER\");
-
-                if (!existing) {
-                  adminDB.createUser({
-                    user: \"$MONGO_RESTORE_USER\",
-                    pwd: \"$MONGO_RESTORE_PASSWORD\",
-                    roles: [
-                      { role: \"restore\", db: \"admin\" }
-                    ]
-                  });
-                  print(\"CREATED\");
-                } else {
-                  adminDB.updateUser(
-                    \"$MONGO_RESTORE_USER\",
-                    {
-                      pwd: \"$MONGO_RESTORE_PASSWORD\",
-                      roles: [
-                        { role: \"restore\", db: \"admin\" }
-                      ]
-                    }
-                  );
-                  print(\"UPDATED\");
-                }
-              "
-          '
-      register: restore_user_result
+    - name: Crear o actualizar usuario de restauracion via TLS en Replica Set
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_ADMIN_USER
+          - --env
+          - MONGO_ADMIN_PASSWORD
+          - --env
+          - MONGO_RESTORE_USER
+          - --env
+          - MONGO_RESTORE_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const adminUser = process.env.MONGO_ADMIN_USER;
+            const adminPass = process.env.MONGO_ADMIN_PASSWORD;
+            const restoreUser = process.env.MONGO_RESTORE_USER;
+            const restorePass = process.env.MONGO_RESTORE_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const db = connect(uri);
+            db.auth(adminUser, adminPass);
+            const adminDB = db.getSiblingDB("admin");
+            const existing = adminDB.getUser(restoreUser);
+            if (!existing) {
+              adminDB.createUser({
+                user: restoreUser,
+                pwd: restorePass,
+                roles: [
+                  { role: "restore", db: "admin" }
+                ]
+              });
+              print("USER_STATUS=CREATED");
+            } else {
+              adminDB.updateUser(restoreUser, {
+                pwd: restorePass,
+                roles: [
+                  { role: "restore", db: "admin" }
+                ]
+              });
+              print("USER_STATUS=UPDATED");
+            }
+            print("PRIMARY=" + db.hello().primary);
+      environment:
+        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+        MONGO_RESTORE_USER: "{{ mongo_restore_user }}"
+        MONGO_RESTORE_PASSWORD: "{{ mongo_restore_password }}"
+      register: restore_user_raw
       changed_when: true
       no_log: true
 
-    # ============================================================
-    # VALIDAR AUTENTICACION
-    # ============================================================
+    - name: Interpretar resultado de gestion de usuario restore
+      ansible.builtin.set_fact:
+        restore_user_status: "{{ restore_user_raw.stdout_lines | select('match', '^USER_STATUS=') | first | regex_replace('^USER_STATUS=', '') }}"
+        restore_user_primary: "{{ restore_user_raw.stdout_lines | select('match', '^PRIMARY=') | first | regex_replace('^PRIMARY=', '') }}"
 
-    - name: Validar autenticacion del usuario de restauracion
-      ansible.builtin.shell: |
-        docker exec \
-          -e MONGO_RESTORE_USER='{{ mongo_restore_user }}' \
-          -e MONGO_RESTORE_PASSWORD='{{ mongo_restore_password }}' \
-          {{ mongo_primary_container.stdout }} \
-          sh -c '
-            mongosh \
-              --quiet \
-              --host 127.0.0.1 \
-              --port 27017 \
-              --username "$MONGO_RESTORE_USER" \
-              --password "$MONGO_RESTORE_PASSWORD" \
-              --authenticationDatabase admin \
-              --eval "
-                const result = db.runCommand({ connectionStatus: 1 });
-
-                if (
-                  result.ok === 1 &&
-                  result.authInfo.authenticatedUsers.length > 0
-                ) {
-                  print(\"AUTH_OK\");
-                } else {
-                  print(\"AUTH_ERROR\");
-                  quit(1);
-                }
-              "
-          '
-      register: restore_auth_validation
+    - name: Validar autenticacion del usuario de restauracion via TLS
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_RESTORE_USER
+          - --env
+          - MONGO_RESTORE_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const user = process.env.MONGO_RESTORE_USER;
+            const pass = process.env.MONGO_RESTORE_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            try {
+              const db = connect(uri);
+              db.auth(user, pass);
+              const res = db.runCommand({ connectionStatus: 1 });
+              if (res.ok === 1 && res.authInfo.authenticatedUsers.length > 0) {
+                print("AUTH_STATUS=AUTH_OK");
+              } else {
+                print("AUTH_STATUS=AUTH_ERROR");
+                quit(1);
+              }
+            } catch(e) {
+              print("AUTH_STATUS=ERROR:" + e.message);
+              quit(1);
+            }
+      environment:
+        MONGO_RESTORE_USER: "{{ mongo_restore_user }}"
+        MONGO_RESTORE_PASSWORD: "{{ mongo_restore_password }}"
+      register: restore_auth_raw
       changed_when: false
       no_log: true
 
     - name: Confirmar autenticacion del usuario de restauracion
       ansible.builtin.assert:
         that:
-          - restore_auth_validation.rc == 0
-          - "'AUTH_OK' in restore_auth_validation.stdout"
-        fail_msg: "[ERROR] El usuario de restauracion no pudo autenticarse"
-        success_msg: "[OK] Usuario de restauracion autenticado correctamente"
-
-    # ============================================================
-    # RESULTADO
-    # ============================================================
+          - restore_auth_raw.rc == 0
+          - "'AUTH_OK' in restore_auth_raw.stdout"
+        fail_msg: "[ERROR] El usuario de restauracion no pudo autenticarse sobre TLS"
+        success_msg: "[OK] Usuario de restauracion autenticado correctamente sobre TLS"
 
     - name: Mostrar resultado final
       ansible.builtin.debug:
         msg:
           - "============================================================"
-          - "USUARIO DE RESTAURACION CONFIGURADO"
+          - "USUARIO DE RESTAURACION CONFIGURADO (TLS)"
           - "============================================================"
-          - "Usuario: {{ mongo_restore_user }}"
+          - "Usuario: {{ mongo_restore_user }} ({{ restore_user_status }})"
           - "Rol: restore"
           - "Authentication DB: admin"
-          - "PRIMARY: {{ mongo_primary.stdout }}"
-          - "Autenticacion: OK"
+          - "PRIMARY: {{ restore_user_primary }}"
+          - "Autenticacion TLS: OK"
           - "Estado: LISTO PARA MONGORESTORE"
           - "============================================================"

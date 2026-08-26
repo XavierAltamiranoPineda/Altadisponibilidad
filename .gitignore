@@ -32,3 +32,8 @@ logs/tls_update_spec_*.json
 PAS-EST-XXX_Implementacion_Respaldos_MongoDB-v2.md
 docs/PAS-EST-XXX_Implementacion_Respaldos_MongoDB-v2_media/
 skills-lock.json
+
+# Runtime backup artifacts
+logs/*.log
+backups/**/*.archive.gz
+backups/**/*.archive.gz.sha256

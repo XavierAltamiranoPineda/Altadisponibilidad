@@ -24,12 +24,12 @@
         that:
           - tls_target_environment == 'local'
           - environment_name == 'local'
-          - mongo_tls_expected_mode == 'allowTLS'
+          - mongo_tls_expected_mode in ['allowTLS', 'preferTLS', 'requireTLS']
           - mongo_tls_enabled | bool
-          - not (mongo_tls_clients_enabled | bool)
           - mongo_tls_deployment_mode == mongo_tls_expected_mode
           - mongo_tls_target_mode == 'requireTLS'
-        fail_msg: "Estado TLS persistido no corresponde a allowTLS LOCAL."
+          - (mongo_tls_deployment_mode in ['allowTLS', 'preferTLS', 'requireTLS'])
+        fail_msg: "Estado TLS persistido no corresponde a la configuracion esperada."
 
     - name: Resolver ruta canónica de CA
       ansible.builtin.command:

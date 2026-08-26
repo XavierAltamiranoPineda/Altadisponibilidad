@@ -22,10 +22,21 @@ mongo_tls_secret_version: "v1"
 mongo_tls_ca_secret_version: "{{ mongo_tls_secret_version }}"
 mongo_tls_node_secret_version: "{{ mongo_tls_secret_version }}"
 
-mongo_tls_client_ca_file: "/etc/ssl/certs/mongo_ca.pem"
 mongo_tls_runtime_dir: "/run/mongo-tls"
 mongo_tls_runtime_ca_file: "/run/mongo-tls/mongo_ca.pem"
 mongo_tls_runtime_certificate_key_file: "/run/mongo-tls/mongo.pem"
+
+# ============================================================
+# TLS - CLIENTES
+# ============================================================
+
+mongo_tls_client_ca_file: "/run/mongo-ca/mongo_ca.pem"
+
+mongo_tls_client_replica_uri: >-
+  mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0&tls=true
+
+mongo_tls_client_direct_uri_template: >-
+  mongodb://NODE:27017/?directConnection=true&tls=true
 
 # Parametros de volumenes de control para GATED_RESTART
 # NOTA DE ARQUITECTURA: driver 'local' es valido y seguro para single-node Swarm local.

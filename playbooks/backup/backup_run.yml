@@ -96,6 +96,25 @@
         success_msg: "[OK] Database Tools {{ mongodb_tools_version }} validado en contenedor"
 
     # ============================================================
+    # VALIDACION DE CERTIFICADO CA TLS PARA CLIENTES
+    # ============================================================
+
+    - name: Validar existencia del certificado CA publico en el host
+      ansible.builtin.stat:
+        path: "{{ mongo_tls_ca_cert_path }}"
+      register: host_ca_cert_stat
+
+    - name: Exigir certificado CA publico para conexion segura
+      ansible.builtin.assert:
+        that:
+          - host_ca_cert_stat.stat.exists
+          - host_ca_cert_stat.stat.isreg
+        fail_msg: >-
+          [ERROR] No se encontro el certificado CA publico en el host: {{ mongo_tls_ca_cert_path }}.
+          Asegurese de que la infraestructura PKI este aprovisionada antes de ejecutar el respaldo.
+        success_msg: "[OK] Certificado CA publico verificado en el host: {{ mongo_tls_ca_cert_path }}"
+
+    # ============================================================
     # IDENTIFICACION DE USUARIO HOST (UID/GID)
     # ============================================================
 
@@ -211,54 +230,55 @@
     # Esta deteccion es exclusivamente para trazabilidad y logs.
     # La conexion real del backup se realiza mediante mongo_backup_uri.
 
-    - name: Buscar un nodo MongoDB activo para trazabilidad
-      ansible.builtin.shell: |
-        for service in {{ mongo_trace_services | map('quote') | join(' ') }}; do
-          container=$(docker ps \
-            --filter "label=com.docker.swarm.service.name=${service}" \
-            --format '{{"{{"}}.ID{{"}}"}}' | head -n1)
-
-          if [ -n "$container" ]; then
-            echo "$container"
-            exit 0
-          fi
-        done
-        exit 1
-      register: mongo_available_container
-      changed_when: false
-
-    - name: Detectar PRIMARY actual para trazabilidad
-      ansible.builtin.shell: |
-        docker exec \
-          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
-          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
-          {{ mongo_available_container.stdout }} \
-          sh -c '
-            mongosh \
-              --quiet \
-              --host 127.0.0.1 \
-              --port 27017 \
-              --username "$MONGO_ADMIN_USER" \
-              --password "$MONGO_ADMIN_PASSWORD" \
-              --authenticationDatabase admin \
-              --eval "db.hello().primary"
-          '
-      register: mongo_primary
+    - name: Detectar PRIMARY actual para trazabilidad via TLS
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_backup_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_ADMIN_USER
+          - --env
+          - MONGO_ADMIN_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const user = process.env.MONGO_ADMIN_USER;
+            const pass = process.env.MONGO_ADMIN_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const db = connect(uri);
+            db.auth(user, pass);
+            print("PRIMARY=" + db.hello().primary);
+      environment:
+        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+      register: mongo_primary_raw
       changed_when: false
       no_log: true
+
+    - name: Interpretar PRIMARY para trazabilidad
+      ansible.builtin.set_fact:
+        mongo_primary: "{{ mongo_primary_raw.stdout_lines | select('match', '^PRIMARY=') | first | regex_replace('^PRIMARY=', '') }}"
 
     - name: Validar PRIMARY disponible para trazabilidad
       ansible.builtin.assert:
         that:
-          - mongo_primary.stdout | length > 0
-          - "':' in mongo_primary.stdout"
+          - mongo_primary | length > 0
+          - "':' in mongo_primary"
         fail_msg: "[ERROR] No se pudo detectar un PRIMARY activo"
-        success_msg: "[OK] PRIMARY disponible para trazabilidad"
+        success_msg: "[OK] PRIMARY disponible para trazabilidad: {{ mongo_primary }}"
 
     - name: Mostrar informacion de conexion HA, espacio y usuario de ejecucion
       ansible.builtin.debug:
         msg:
-          - "[OK] PRIMARY detectado (trazabilidad): {{ mongo_primary.stdout }}"
+          - "[OK] PRIMARY detectado (trazabilidad): {{ mongo_primary }}"
           - "[OK] Espacio libre previo: {{ backup_free_percent }}% (Minimo: {{ backup_min_free_percent }}%)"
           - "[OK] Servicios evaluados trazabilidad: {{ mongo_trace_services | join(', ') }}"
           - "[OK] Usuario Host ejecutor: UID={{ backup_host_uid.stdout }} GID={{ backup_host_gid.stdout }}"
@@ -292,24 +312,72 @@
               - "{{ backup_host_uid.stdout }}:{{ backup_host_gid.stdout }}"
               - --network
               - "{{ mongo_backup_network }}"
+              - --env
+              - MONGO_BACKUP_USER
+              - --env
+              - MONGO_BACKUP_PASSWORD
               - -v
               - "{{ backup_directory }}:/backup"
+              - -v
+              - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
               - "{{ mongo_backup_tools_image }}"
-              - mongodump
-              - "--uri={{ mongo_backup_uri }}"
-              - --username
-              - "{{ mongo_backup_user }}"
-              - --password
-              - "{{ mongo_backup_password }}"
-              - --authenticationDatabase
-              - "admin"
-              - --db
-              - "{{ mongo_database }}"
-              - --gzip
-              - "--archive=/backup/{{ backup_filename }}"
+              - sh
+              - -ec
+              - |
+                umask 077
+                CFG_FILE="$(mktemp /tmp/mongodump_cfg.XXXXXX)"
+                trap 'rm -f "$CFG_FILE"' EXIT INT TERM
+                printf 'password: |-\n  %s\n' "$MONGO_BACKUP_PASSWORD" > "$CFG_FILE"
+                chmod 0600 "$CFG_FILE"
+                mongodump \
+                  --config="$CFG_FILE" \
+                  --uri="{{ mongo_backup_uri }}" \
+                  --sslCAFile="{{ mongo_tls_client_ca_file }}" \
+                  --username="$MONGO_BACKUP_USER" \
+                  --authenticationDatabase=admin \
+                  --db="{{ mongo_database }}" \
+                  --gzip \
+                  --archive="/backup/{{ backup_filename }}"
+          environment:
+            MONGO_BACKUP_USER: "{{ mongo_backup_user }}"
+            MONGO_BACKUP_PASSWORD: "{{ mongo_backup_password }}"
           register: mongodump_result
           changed_when: true
           no_log: true
+
+      rescue:
+        - name: Sanitizar y diagnosticar fallo en mongodump
+          vars:
+            raw_stderr: "{{ mongodump_result.stderr | default(ansible_failed_result.stderr | default('')) }}"
+            raw_stdout: "{{ mongodump_result.stdout | default(ansible_failed_result.stdout | default('')) }}"
+            raw_msg: "{{ ansible_failed_result.msg | default('') }}"
+            sanitized_stderr: >-
+              {{
+                raw_stderr
+                | regex_replace(mongo_backup_password | regex_escape, '[REDACTED]')
+                | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
+                | regex_replace('(?m)^password:.*$', 'password: [REDACTED]')
+              }}
+            sanitized_stdout: >-
+              {{
+                raw_stdout
+                | regex_replace(mongo_backup_password | regex_escape, '[REDACTED]')
+                | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
+                | regex_replace('(?m)^password:.*$', 'password: [REDACTED]')
+              }}
+            sanitized_msg: >-
+              {{
+                raw_msg
+                | regex_replace(mongo_backup_password | regex_escape, '[REDACTED]')
+                | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
+              }}
+          ansible.builtin.fail:
+            msg:
+              error_type: "MONGODUMP_EXECUTION_FAILED"
+              return_code: "{{ mongodump_result.rc | default(ansible_failed_result.rc | default(-1)) }}"
+              sanitized_stderr: "{{ sanitized_stderr }}"
+              sanitized_stdout: "{{ sanitized_stdout }}"
+              details: "{{ sanitized_msg }}"
 
       always:
         - name: Limpiar y eliminar contenedor temporal de respaldo
@@ -373,7 +441,7 @@
           {{ backup_timestamp }}
           | environment={{ environment_name }}
           | database={{ mongo_database }}
-          | primary={{ mongo_primary.stdout }}
+          | primary={{ mongo_primary }}
           | replica_set={{ mongo_replica_set }}
           | network={{ mongo_backup_network }}
           | tools_version={{ mongodb_tools_version }}
@@ -395,7 +463,7 @@
           - "============================================================"
           - "Ambiente: {{ environment_name }}"
           - "Base: {{ mongo_database }}"
-          - "PRIMARY (trazabilidad): {{ mongo_primary.stdout }}"
+          - "PRIMARY (trazabilidad): {{ mongo_primary }}"
           - "Espacio libre previo: {{ backup_free_percent }}% (Minimo: {{ backup_min_free_percent }}%)"
           - "Usuario Host ejecutor: UID={{ backup_host_uid.stdout }} GID={{ backup_host_gid.stdout }}"
           - "Red Overlay: {{ mongo_backup_network }}"

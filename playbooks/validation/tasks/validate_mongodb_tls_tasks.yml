@@ -175,5 +175,7 @@
                       | map('extract', mongo_tls_effective_options)
                       | map(attribute='tlsMode') | list)) }}
       tls: "OK por nodo"
-      plaintext: "OK por nodo"
+      plaintext: "{{ 'OK por nodo (permitido)' if (mongo_tls_deployment_mode in ['allowTLS', 'preferTLS']) else 'RECHAZADO por nodo (seguro)' }}"
+      clients_tls: "{{ 'ACTIVADO' if (mongo_tls_clients_enabled | bool) else 'PENDIENTE' }}"
+      deployment_mode: "{{ mongo_tls_deployment_mode }}"
       cluster_auth_mode: "keyFile"

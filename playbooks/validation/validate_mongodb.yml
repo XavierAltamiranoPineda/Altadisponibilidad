@@ -1,16 +1,17 @@
 ---
-- name: Validar infraestructura MongoDB V2
+- name: Validacion Integral MongoDB V2 (TLS)
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/{{ target_environment | default('local') }}.yml"
     - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
 
   vars:
     mongo_network: "mongo_swarm_net"
     mongo_secret: "mongo_keyfile"
-    mongo_replicaset: "rs0"
 
   tasks:
 
@@ -93,100 +94,100 @@
       loop: "{{ service_replicas.results }}"
 
     # ============================================================
-    # 5. OBTENER UN NODO DISPONIBLE
+    # 5. VALIDAR AUTENTICACION Y TOPOLOGIA VIA CLIENTE TLS
     # ============================================================
 
-    - name: Obtener contenedor mongo1
-      ansible.builtin.shell:
-        cmd: >
-          docker ps -q
-          --filter "label=com.docker.swarm.service.name=mongo1"
-          | head -n 1
-      register: mongo1_container
-      changed_when: false
+    - name: Validar existencia de certificado CA publico
+      ansible.builtin.stat:
+        path: "{{ mongo_tls_ca_cert_path }}"
+      register: mongo_ca_stat
 
-    - name: Validar contenedor mongo1
+    - name: Exigir certificado CA publico
       ansible.builtin.assert:
         that:
-          - mongo1_container.stdout | trim != ""
-        fail_msg: "ERROR: No se encontro mongo1."
-        success_msg: "OK: mongo1 encontrado."
+          - mongo_ca_stat.stat.exists
+          - mongo_ca_stat.stat.isreg
+        fail_msg: "[ERROR] Certificado CA no encontrado: {{ mongo_tls_ca_cert_path }}"
+        success_msg: "[OK] Certificado CA verificado en el host"
 
-    # ============================================================
-    # 6. VALIDAR AUTENTICACION
-    # ============================================================
-
-    - name: Validar autenticacion MongoDB
+    - name: Validar autenticacion y topologia via TLS
       ansible.builtin.command:
-        cmd: >
-          docker exec {{ mongo1_container.stdout | trim }}
-          mongosh --quiet
-          --username {{ mongo_admin_user }}
-          --password {{ mongo_admin_password }}
-          --authenticationDatabase admin
-          --eval "db.adminCommand({connectionStatus:1}).ok"
-      register: auth_test
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_ADMIN_USER
+          - --env
+          - MONGO_ADMIN_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const user = process.env.MONGO_ADMIN_USER;
+            const pass = process.env.MONGO_ADMIN_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            try {
+              const db = connect(uri);
+              db.auth(user, pass);
+              const conn = db.adminCommand({connectionStatus: 1});
+              const rs = db.adminCommand({replSetGetStatus: 1});
+              const authOk = conn.ok === 1 && conn.authInfo.authenticatedUsers.length > 0;
+              print("VALIDATION_JSON=" + JSON.stringify({
+                authOk: authOk,
+                setName: rs.set,
+                primary: (rs.members.find(m => m.stateStr === 'PRIMARY') || {}).name
+              }));
+            } catch(e) {
+              print("VALIDATION_JSON=" + JSON.stringify({ error: e.message, authOk: false }));
+            }
+      environment:
+        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+      register: validation_diag_raw
       changed_when: false
       no_log: true
 
-    - name: Confirmar autenticacion
-      ansible.builtin.assert:
-        that:
-          - auth_test.stdout | trim == "1"
-        fail_msg: "ERROR: La autenticacion MongoDB fallo."
-        success_msg: "OK: Autenticacion MongoDB funcionando."
-
-    # ============================================================
-    # 7. VALIDAR REPLICA SET
-    # ============================================================
-
-    - name: Consultar Replica Set
-      ansible.builtin.command:
-        cmd: >
-          docker exec {{ mongo1_container.stdout | trim }}
-          mongosh --quiet
-          --username {{ mongo_admin_user }}
-          --password {{ mongo_admin_password }}
-          --authenticationDatabase admin
-          --eval "rs.status().set"
-      register: replset_name
-      changed_when: false
+    - name: Interpretar diagnostico TLS
+      ansible.builtin.set_fact:
+        validation_diag: >-
+          {{
+            (validation_diag_raw.stdout_lines
+             | select('match', '^VALIDATION_JSON=') | first
+             | regex_replace('^VALIDATION_JSON=', ''))
+            | from_json
+          }}
       no_log: true
 
-    - name: Validar Replica Set
+    - name: Confirmar autenticacion TLS
       ansible.builtin.assert:
         that:
-          - replset_name.stdout | trim == mongo_replicaset
+          - validation_diag.authOk | bool
+        fail_msg: "ERROR: La autenticacion MongoDB fallo sobre TLS."
+        success_msg: "OK: Autenticacion MongoDB funcionando sobre TLS."
+
+    - name: Confirmar Replica Set
+      ansible.builtin.assert:
+        that:
+          - validation_diag.setName == mongo_replica_set
         fail_msg: "ERROR: Replica Set incorrecto."
-        success_msg: "OK: Replica Set {{ mongo_replicaset }}."
+        success_msg: "OK: Replica Set {{ mongo_replica_set }}."
 
-    # ============================================================
-    # 8. DETECTAR PRIMARY ACTUAL
-    # ============================================================
-
-    - name: Detectar PRIMARY actual
-      ansible.builtin.command:
-        cmd: >
-          docker exec {{ mongo1_container.stdout | trim }}
-          mongosh --quiet
-          --username {{ mongo_admin_user }}
-          --password {{ mongo_admin_password }}
-          --authenticationDatabase admin
-          --eval "db.hello().primary"
-      register: current_primary
-      changed_when: false
-      no_log: true
-
-    - name: Validar PRIMARY
+    - name: Confirmar PRIMARY valido
       ansible.builtin.assert:
         that:
-          - current_primary.stdout | trim in
-            ["mongo1:27017", "mongo2:27017", "mongo3:27017"]
+          - validation_diag.primary in ["mongo1:27017", "mongo2:27017", "mongo3:27017"]
         fail_msg: "ERROR: No se pudo detectar un PRIMARY valido."
-        success_msg: "OK: PRIMARY detectado."
+        success_msg: "OK: PRIMARY detectado: {{ validation_diag.primary }}."
 
     # ============================================================
-    # 9. VALIDAR RED DE LOS SERVICIOS
+    # 6. VALIDAR RED DE LOS SERVICIOS
     # ============================================================
 
     - name: Obtener ID de red MongoDB
@@ -218,14 +219,14 @@
       loop: "{{ service_networks.results }}"
 
     # ============================================================
-    # 10. RESULTADO
+    # 7. RESULTADO
     # ============================================================
 
     - name: Mostrar resultado final
       ansible.builtin.debug:
         msg:
           - "============================================================"
-          - "VALIDACION GENERAL MONGODB V2"
+          - "VALIDACION GENERAL MONGODB V2 (TLS)"
           - "============================================================"
           - "[OK] Docker Swarm: ACTIVE"
           - "[OK] Red: {{ mongo_network }}"
@@ -233,9 +234,9 @@
           - "[OK] mongo1: 1/1"
           - "[OK] mongo2: 1/1"
           - "[OK] mongo3: 1/1"
-          - "[OK] Autenticacion funcionando"
-          - "[OK] Replica Set: {{ mongo_replicaset }}"
-          - "[OK] PRIMARY actual: {{ current_primary.stdout | trim }}"
+          - "[OK] Autenticacion TLS funcionando"
+          - "[OK] Replica Set: {{ mongo_replica_set }}"
+          - "[OK] PRIMARY actual: {{ validation_diag.primary }}"
           - "[OK] Servicios conectados a {{ mongo_network }}"
           - "============================================================"
           - "VALIDACION GENERAL EXITOSA"

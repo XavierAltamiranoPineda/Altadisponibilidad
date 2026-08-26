@@ -228,3 +228,14 @@
           --keyFile /etc/mongo-keyfile \
           --bind_ip_all
       fi
+- name: Definir argumentos runtime del wrapper
+  ansible.builtin.set_fact:
+    mongo_tls_runtime_argv:
+      - '-ec'
+      - "{{ mongo_tls_runtime_script }}"
+      - '--'
+      - "{{ mongo_tls_runtime_identity.uid | string }}"
+      - "{{ mongo_tls_runtime_identity.gid | string }}"
+      - "{{ mongo_tls_runtime_identity.entrypoint }}"
+      - "{{ mongo_tls_deployment_mode | default('disabled') }}"
+      - "{{ mongo_service | default('mongo1') }}"

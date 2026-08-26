@@ -24,7 +24,7 @@
   delay: 3
   until: mongo_tls_probe.rc == 0 and 'TLS_OK' in mongo_tls_probe.stdout
 
-- name: Probar plaintext permitido en {{ mongo_tls_validation_node }}
+- name: Probar plaintext permitido en {{ mongo_tls_validation_node }} (allowTLS / preferTLS)
   ansible.builtin.command:
     argv:
       - docker
@@ -43,3 +43,31 @@
   retries: 10
   delay: 3
   until: mongo_plaintext_probe.rc == 0 and 'PLAINTEXT_OK' in mongo_plaintext_probe.stdout
+  when: mongo_tls_deployment_mode | default('allowTLS') in ['allowTLS', 'preferTLS']
+
+- name: Probar rechazo de plaintext en {{ mongo_tls_validation_node }} (requireTLS)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - "{{ mongo_network }}"
+      - "{{ mongo_image }}"
+      - mongosh
+      - --quiet
+      - "mongodb://{{ mongo_tls_validation_node }}:27017/admin?directConnection=true&tls=false&serverSelectionTimeoutMS=5000"
+      - --eval
+      - "db.runCommand({ping:1})"
+  register: mongo_plaintext_reject_probe
+  changed_when: false
+  failed_when: false
+  when: mongo_tls_deployment_mode | default('allowTLS') == 'requireTLS'
+
+- name: Validar rechazo efectivo de plaintext en {{ mongo_tls_validation_node }}
+  ansible.builtin.assert:
+    that:
+      - mongo_plaintext_reject_probe.rc != 0
+    fail_msg: "Plaintext fue aceptado en {{ mongo_tls_validation_node }} a pesar de estar en requireTLS."
+    success_msg: "OK: Plaintext rechazado en {{ mongo_tls_validation_node }} bajo requireTLS."
+  when: mongo_tls_deployment_mode | default('allowTLS') == 'requireTLS'

@@ -1,5 +1,5 @@
 ---
-- name: Ejecutar autenticacion MongoDB sin secretos en argv
+- name: Ejecutar autenticacion MongoDB sin secretos en argv via TLS
   ansible.builtin.command:
     argv:
       - docker
@@ -7,6 +7,8 @@
       - --rm
       - --network
       - '{{ mongo_network }}'
+      - -v
+      - '{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro'
       - --env
       - MONGO_ADMIN_USER
       - --env

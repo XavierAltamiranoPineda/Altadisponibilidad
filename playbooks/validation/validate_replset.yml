@@ -1,160 +1,146 @@
 ---
-- name: Validar Replica Set MongoDB V2
+- name: Validar Replica Set MongoDB V2 (TLS)
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/{{ target_environment | default('local') }}.yml"
     - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    mongo_network: "mongo_swarm_net"
 
   tasks:
 
-    - name: Obtener contenedor mongo1
-      shell: docker ps -q --filter name=mongo1
-      register: mongo1_container
-      changed_when: false
+    - name: Validar existencia de certificado CA publico
+      ansible.builtin.stat:
+        path: "{{ mongo_tls_ca_cert_path }}"
+      register: mongo_ca_stat
 
-    - name: Validar contenedor mongo1
-      assert:
+    - name: Exigir certificado CA publico
+      ansible.builtin.assert:
         that:
-          - mongo1_container.stdout | trim != ""
-        fail_msg: "No se encontro el contenedor mongo1."
-        success_msg: "OK: Contenedor mongo1 encontrado."
+          - mongo_ca_stat.stat.exists
+          - mongo_ca_stat.stat.isreg
+        fail_msg: "[ERROR] Certificado CA no encontrado: {{ mongo_tls_ca_cert_path }}"
+        success_msg: "[OK] Certificado CA verificado en el host"
 
-    - name: Probar autenticacion
-      shell: >
-        docker exec {{ mongo1_container.stdout | trim }}
-        mongosh --quiet
-        --username {{ mongo_admin_user }}
-        --password {{ mongo_admin_password }}
-        --authenticationDatabase admin
-        --eval "db.adminCommand({connectionStatus:1}).ok"
-      register: auth_test
+    - name: Consultar estado completo del Replica Set via TLS
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_ADMIN_USER
+          - --env
+          - MONGO_ADMIN_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const user = process.env.MONGO_ADMIN_USER;
+            const pass = process.env.MONGO_ADMIN_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            try {
+              const db = connect(uri);
+              db.auth(user, pass);
+              const connStatus = db.adminCommand({connectionStatus: 1});
+              const rsStatus = db.adminCommand({replSetGetStatus: 1});
+              const authOk = connStatus.ok === 1 && connStatus.authInfo.authenticatedUsers.length > 0;
+              const members = rsStatus.members.map(m => ({
+                name: m.name,
+                stateStr: m.stateStr,
+                health: m.health
+              }));
+              print("REPLSET_JSON=" + JSON.stringify({
+                authOk: authOk,
+                setName: rsStatus.set,
+                members: members,
+                primary: (members.find(m => m.stateStr === 'PRIMARY') || {}).name,
+                secondaries: members.filter(m => m.stateStr === 'SECONDARY').map(m => m.name),
+                allHealthy: members.length === 3 && members.every(m => m.health === 1)
+              }));
+            } catch(e) {
+              print("REPLSET_JSON=" + JSON.stringify({ error: e.message, authOk: false, allHealthy: false }));
+            }
+      environment:
+        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+      register: replset_validation_raw
       changed_when: false
+      no_log: true
+
+    - name: Interpretar diagnostico del Replica Set
+      ansible.builtin.set_fact:
+        replset_info: >-
+          {{
+            (replset_validation_raw.stdout_lines
+             | select('match', '^REPLSET_JSON=') | first
+             | regex_replace('^REPLSET_JSON=', ''))
+            | from_json
+          }}
       no_log: true
 
     - name: Validar autenticacion
-      assert:
+      ansible.builtin.assert:
         that:
-          - auth_test.stdout | trim == "1"
-        fail_msg: "ERROR: La autenticacion fallo."
-        success_msg: "OK: Autenticacion funcionando."
+          - replset_info.authOk | bool
+        fail_msg: "ERROR: La autenticacion fallo sobre conexion TLS."
+        success_msg: "OK: Autenticacion funcionando sobre TLS."
 
-    - name: Consultar Replica Set
-      shell: >
-        docker exec {{ mongo1_container.stdout | trim }}
-        mongosh --quiet
-        --username {{ mongo_admin_user }}
-        --password {{ mongo_admin_password }}
-        --authenticationDatabase admin
-        --eval "rs.status().set"
-      register: replset_name
-      changed_when: false
-      no_log: true
-
-    - name: Validar Replica Set
-      assert:
+    - name: Validar nombre del Replica Set
+      ansible.builtin.assert:
         that:
-          - replset_name.stdout | trim == "rs0"
-        fail_msg: "ERROR: Replica Set incorrecto."
-        success_msg: "OK: Replica Set rs0."
+          - replset_info.setName == mongo_replica_set
+        fail_msg: "ERROR: Replica Set incorrecto. Esperado: {{ mongo_replica_set }}, Obtenido: {{ replset_info.setName }}"
+        success_msg: "OK: Replica Set {{ mongo_replica_set }}."
 
-    - name: Consultar miembros
-      shell: >
-        docker exec {{ mongo1_container.stdout | trim }}
-        mongosh --quiet
-        --username {{ mongo_admin_user }}
-        --password {{ mongo_admin_password }}
-        --authenticationDatabase admin
-        --eval "rs.status().members.map(m => m.name + ' | ' + m.stateStr + ' | health=' + m.health).join(';')"
-      register: members
-      changed_when: false
-      no_log: true
-
-    - name: Validar mongo1
-      assert:
+    - name: Validar presencia de los tres nodos
+      ansible.builtin.assert:
         that:
-          - "'mongo1:27017' in members.stdout"
-        fail_msg: "ERROR: mongo1 no esta presente."
-        success_msg: "OK: mongo1 presente."
+          - (replset_info.members | map(attribute='name') | list | sort) == ['mongo1:27017', 'mongo2:27017', 'mongo3:27017']
+        fail_msg: "ERROR: Los tres nodos no estan presentes en el Replica Set."
+        success_msg: "OK: mongo1, mongo2 y mongo3 presentes."
 
-    - name: Validar mongo2
-      assert:
+    - name: Validar topologia (1 PRIMARY, 2 SECONDARY)
+      ansible.builtin.assert:
         that:
-          - "'mongo2:27017' in members.stdout"
-        fail_msg: "ERROR: mongo2 no esta presente."
-        success_msg: "OK: mongo2 presente."
+          - replset_info.primary is defined
+          - replset_info.primary | length > 0
+          - replset_info.secondaries | length == 2
+        fail_msg: "ERROR: Topologia incorrecta (esperado 1 PRIMARY y 2 SECONDARY)."
+        success_msg: "OK: 1 PRIMARY ({{ replset_info.primary }}) y 2 SECONDARY identificados."
 
-    - name: Validar mongo3
-      assert:
+    - name: Validar salud integral del cluster
+      ansible.builtin.assert:
         that:
-          - "'mongo3:27017' in members.stdout"
-        fail_msg: "ERROR: mongo3 no esta presente."
-        success_msg: "OK: mongo3 presente."
-
-    - name: Consultar estados
-      shell: >
-        docker exec {{ mongo1_container.stdout | trim }}
-        mongosh --quiet
-        --username {{ mongo_admin_user }}
-        --password {{ mongo_admin_password }}
-        --authenticationDatabase admin
-        --eval "rs.status().members.map(m => m.stateStr).join(',')"
-      register: states
-      changed_when: false
-      no_log: true
-
-    - name: Validar PRIMARY
-      assert:
-        that:
-          - "'PRIMARY' in states.stdout"
-        fail_msg: "ERROR: No existe PRIMARY."
-        success_msg: "OK: PRIMARY encontrado."
-
-    - name: Validar SECONDARY
-      assert:
-        that:
-          - states.stdout.count('SECONDARY') == 2
-        fail_msg: "ERROR: No existen dos SECONDARY."
-        success_msg: "OK: Dos SECONDARY encontrados."
-
-    - name: Consultar salud
-      shell: >
-        docker exec {{ mongo1_container.stdout | trim }}
-        mongosh --quiet
-        --username {{ mongo_admin_user }}
-        --password {{ mongo_admin_password }}
-        --authenticationDatabase admin
-        --eval "rs.status().members.map(m => m.health).join(',')"
-      register: health
-      changed_when: false
-      no_log: true
-
-    - name: Validar salud
-      assert:
-        that:
-          - health.stdout | trim == "1,1,1"
-        fail_msg: "ERROR: Hay nodos no saludables."
+          - replset_info.allHealthy | bool
+        fail_msg: "ERROR: Hay nodos no saludables en el Replica Set."
         success_msg: "OK: Los tres nodos tienen health=1."
 
     - name: Mostrar resultado
-      debug:
+      ansible.builtin.debug:
         msg:
           - ""
           - "============================================================"
-          - "        VALIDACION REPLICA SET MONGODB V2"
+          - "        VALIDACION REPLICA SET MONGODB V2 (TLS)"
           - "============================================================"
           - ""
-          - "[OK] Autenticacion"
-          - "[OK] Replica Set: rs0"
-          - "[OK] PRIMARY: mongo1:27017"
-          - "[OK] SECONDARY: mongo2:27017"
-          - "[OK] SECONDARY: mongo3:27017"
-          - "[OK] Total de nodos: 3"
+          - "[OK] Autenticacion TLS: OK"
+          - "[OK] Replica Set: {{ replset_info.setName }}"
+          - "[OK] PRIMARY: {{ replset_info.primary }}"
+          - "[OK] SECONDARIES: {{ replset_info.secondaries | join(', ') }}"
+          - "[OK] Total de nodos: {{ replset_info.members | length }}"
           - "[OK] Salud: 1,1,1"
-          - ""
-          - "Estado:"
-          - "{{ members.stdout }}"
           - ""
           - "============================================================"
           - "        VALIDACION EXITOSA"

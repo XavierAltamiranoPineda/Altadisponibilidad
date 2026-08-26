@@ -10,7 +10,7 @@ environment_name: "local"
 # ============================================================
 
 mongo_tls_enabled: true
-mongo_tls_clients_enabled: false
+mongo_tls_clients_enabled: true
 mongo_tls_target_mode: "requireTLS"
 mongo_tls_deployment_mode: "allowTLS"
 
@@ -35,7 +35,7 @@ mongo_database: "prueba_ha"
 # URI de conexion para respaldo con alta disponibilidad (Replica Set)
 # Conecta a la red overlay mongo_swarm_net con descubrimiento de rs0
 # Sin credenciales (las credenciales se leen desde vars/vault_mongodb.yml)
-mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0"
+mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0&tls=true"
 
 # Red overlay de Docker Swarm a la que se conecta el contenedor temporal
 mongo_backup_network: "mongo_swarm_net"

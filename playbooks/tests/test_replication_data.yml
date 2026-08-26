@@ -1,101 +1,151 @@
 ---
-- name: Crear datos para prueba de replicacion MongoDB
+- name: Insertar y validar datos de prueba en MongoDB V2 (TLS)
   hosts: localhost
   connection: local
   gather_facts: false
 
   vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/{{ target_environment | default('local') }}.yml"
     - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
 
   vars:
+    mongo_network: "mongo_swarm_net"
     test_database: "prueba_ha"
-    test_collection: "registros"
+    test_collection: "datos_failover"
 
   tasks:
 
-    - name: Obtener contenedor mongo1
-      ansible.builtin.shell:
-        cmd: docker ps -q --filter name=mongo1
-      register: mongo1_container
-      changed_when: false
+    - name: Validar existencia de certificado CA publico
+      ansible.builtin.stat:
+        path: "{{ mongo_tls_ca_cert_path }}"
+      register: mongo_ca_stat
 
-    - name: Validar contenedor mongo1
+    - name: Exigir certificado CA publico
       ansible.builtin.assert:
         that:
-          - mongo1_container.stdout | trim != ""
-        fail_msg: "ERROR: No se encontro mongo1."
-        success_msg: "OK: Contenedor mongo1 encontrado."
+          - mongo_ca_stat.stat.exists
+          - mongo_ca_stat.stat.isreg
+        fail_msg: "[ERROR] Certificado CA no encontrado: {{ mongo_tls_ca_cert_path }}"
+        success_msg: "[OK] Certificado CA verificado en el host"
 
-    - name: Consultar PRIMARY actual
+    - name: Insertar documento de prueba via conexion TLS
       ansible.builtin.command:
-        cmd: >
-          docker exec {{ mongo1_container.stdout | trim }}
-          mongosh --quiet
-          --username {{ mongo_admin_user }}
-          --password {{ mongo_admin_password }}
-          --authenticationDatabase admin
-          --eval "db.hello().primary"
-      register: current_primary
-      changed_when: false
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_ADMIN_USER
+          - --env
+          - MONGO_ADMIN_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const user = process.env.MONGO_ADMIN_USER;
+            const pass = process.env.MONGO_ADMIN_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const db = connect(uri);
+            db.auth(user, pass);
+            const targetDB = db.getSiblingDB('{{ test_database }}');
+            const res = targetDB.{{ test_collection }}.updateOne(
+              { prueba: 'alta_disponibilidad_v2' },
+              {
+                $set: {
+                  fecha: new Date(),
+                  descripcion: 'Documento para validar replicacion y failover',
+                  estado: 'ACTIVO'
+                }
+              },
+              { upsert: true }
+            );
+            const primary = db.hello().primary;
+            print("INSERT_JSON=" + JSON.stringify({ ok: res.acknowledged, primary: primary }));
+      environment:
+        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+      register: insert_result_raw
+      changed_when: true
       no_log: true
 
-    - name: Mostrar PRIMARY actual
-      ansible.builtin.debug:
-        msg: "PRIMARY actual: {{ current_primary.stdout | trim }}"
-
-    - name: Insertar documento de prueba
-      ansible.builtin.command:
-        cmd: >
-          docker exec {{ mongo1_container.stdout | trim }}
-          mongosh --quiet
-          --username {{ mongo_admin_user }}
-          --password {{ mongo_admin_password }}
-          --authenticationDatabase admin
-          --eval "db.getSiblingDB('{{ test_database }}').{{ test_collection }}.updateOne(
-            { prueba: 'alta_disponibilidad_v2' },
-            {
-              $set: {
-                prueba: 'alta_disponibilidad_v2',
-                descripcion: 'Documento para validar replicacion y failover',
-                estado: 'ACTIVO'
-              }
-            },
-            { upsert: true }
-          ).acknowledged"
-      register: insert_result
-      changed_when: true
+    - name: Interpretar resultado de insercion
+      ansible.builtin.set_fact:
+        insert_info: >-
+          {{
+            (insert_result_raw.stdout_lines
+             | select('match', '^INSERT_JSON=') | first
+             | regex_replace('^INSERT_JSON=', ''))
+            | from_json
+          }}
       no_log: true
 
     - name: Validar escritura
       ansible.builtin.assert:
         that:
-          - insert_result.stdout | trim == "true"
-        fail_msg: "ERROR: No fue posible escribir el documento de prueba."
-        success_msg: "OK: Documento almacenado correctamente."
+          - insert_info.ok | bool
+        fail_msg: "ERROR: No fue posible escribir el documento de prueba sobre TLS."
+        success_msg: "OK: Documento almacenado correctamente sobre conexion TLS."
 
-    - name: Consultar documento creado
+    - name: Consultar documento creado via TLS
       ansible.builtin.command:
-        cmd: >
-          docker exec {{ mongo1_container.stdout | trim }}
-          mongosh --quiet
-          --username {{ mongo_admin_user }}
-          --password {{ mongo_admin_password }}
-          --authenticationDatabase admin
-          --eval "JSON.stringify(
-            db.getSiblingDB('{{ test_database }}').{{ test_collection }}.findOne(
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - "{{ mongo_network }}"
+          - -v
+          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+          - --env
+          - MONGO_ADMIN_USER
+          - --env
+          - MONGO_ADMIN_PASSWORD
+          - "{{ mongo_image }}"
+          - mongosh
+          - --quiet
+          - --nodb
+          - --eval
+          - |
+            const user = process.env.MONGO_ADMIN_USER;
+            const pass = process.env.MONGO_ADMIN_PASSWORD;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const db = connect(uri);
+            db.auth(user, pass);
+            const doc = db.getSiblingDB('{{ test_database }}').{{ test_collection }}.findOne(
               { prueba: 'alta_disponibilidad_v2' },
               { _id: 0 }
-            )
-          )"
-      register: test_document
+            );
+            print("QUERY_JSON=" + JSON.stringify(doc));
+      environment:
+        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+      register: test_document_raw
       changed_when: false
+      no_log: true
+
+    - name: Interpretar documento consultado
+      ansible.builtin.set_fact:
+        test_document: >-
+          {{
+            (test_document_raw.stdout_lines
+             | select('match', '^QUERY_JSON=') | first
+             | regex_replace('^QUERY_JSON=', ''))
+            | from_json
+          }}
       no_log: true
 
     - name: Validar existencia del documento
       ansible.builtin.assert:
         that:
-          - "'alta_disponibilidad_v2' in test_document.stdout"
-          - "'ACTIVO' in test_document.stdout"
+          - test_document.prueba == 'alta_disponibilidad_v2'
+          - test_document.estado == 'ACTIVO'
         fail_msg: "ERROR: El documento no fue encontrado."
         success_msg: "OK: Documento de prueba encontrado."
 
@@ -103,12 +153,12 @@
       ansible.builtin.debug:
         msg:
           - "============================================================"
-          - "PRUEBA DE DATOS PARA REPLICACION"
+          - "PRUEBA DE DATOS PARA REPLICACION (TLS)"
           - "============================================================"
-          - "[OK] PRIMARY: {{ current_primary.stdout | trim }}"
+          - "[OK] PRIMARY: {{ insert_info.primary }}"
           - "[OK] Base de datos: {{ test_database }}"
           - "[OK] Coleccion: {{ test_collection }}"
-          - "[OK] Documento: alta_disponibilidad_v2"
-          - "[OK] Estado: ACTIVO"
-          - "[OK] Escritura confirmada"
+          - "[OK] Documento: {{ test_document.prueba }}"
+          - "[OK] Estado: {{ test_document.estado }}"
+          - "[OK] Escritura confirmada sobre TLS"
           - "============================================================"
