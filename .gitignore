@@ -37,3 +37,16 @@ skills-lock.json
 logs/*.log
 backups/**/*.archive.gz
 backups/**/*.archive.gz.sha256
+
+# Runtime logs
+logs/*.log
+logs/*.lock
+logs/tls_rollout_state.json
+logs/tls_update_spec_*.json
+
+# MongoDB backup artifacts
+backups/**/*.archive.gz
+backups/**/*.archive.gz.sha256
+
+# Local secrets
+secrets/vault_password

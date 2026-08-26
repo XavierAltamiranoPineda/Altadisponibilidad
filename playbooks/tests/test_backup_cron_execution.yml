@@ -1,0 +1,229 @@
+---
+# ============================================================
+# Playbook: Prueba Controlada y Reversible del Scheduler Cron Real
+#
+# Proposito:
+#   Demuestra que el daemon cron del sistema ejecuta de forma
+#   automatica, real y no interactiva el wrapper de respaldos
+#   scripts/run_mongodb_backup.sh sin alterar la entrada permanente.
+# ============================================================
+
+- name: Validar ejecucion real y controlada del cron de respaldos
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+
+  vars:
+    project_root: "{{ playbook_dir }}/../.."
+    temp_cron_job_name: "MongoDB Backup Process - Test Temporary"
+
+  tasks:
+
+    # ============================================================
+    # 1. RESOLUCION DE RUTAS Y ARCHIVOS
+    # ============================================================
+
+    - name: Obtener ruta canonica del proyecto
+      ansible.builtin.command:
+        cmd: "realpath {{ project_root }}"
+      register: canonical_project_root
+      changed_when: false
+
+    - name: Definir rutas absolutas
+      ansible.builtin.set_fact:
+        resolved_project_root: "{{ canonical_project_root.stdout }}"
+        resolved_backup_wrapper: "{{ canonical_project_root.stdout }}/scripts/run_mongodb_backup.sh"
+        resolved_cron_log: "{{ canonical_project_root.stdout }}/logs/{{ backup_cron_log_filename }}"
+        resolved_backup_log: "{{ canonical_project_root.stdout }}/logs/{{ backup_log_filename }}"
+        resolved_backup_dir: "{{ canonical_project_root.stdout }}/backups/mongodb/{{ mongo_database }}"
+
+    - name: Validar existencia del wrapper ejecutable
+      ansible.builtin.stat:
+        path: "{{ resolved_backup_wrapper }}"
+      register: wrapper_stat
+
+    - name: Confirmar que el wrapper es ejecutable
+      ansible.builtin.assert:
+        that:
+          - wrapper_stat.stat.exists
+          - wrapper_stat.stat.isreg
+          - wrapper_stat.stat.executable
+        fail_msg: "[ERROR] El wrapper no existe o no es ejecutable"
+
+    # ============================================================
+    # 2. CAPTURA DE LINEA BASE PREVIA
+    # ============================================================
+
+    - name: Listar backups y checksums existentes antes de la prueba
+      ansible.builtin.find:
+        paths: "{{ resolved_backup_dir }}"
+        patterns: "*.archive.gz"
+        recurse: true
+      register: baseline_backups
+
+    - name: Listar checksums existentes antes de la prueba
+      ansible.builtin.find:
+        paths: "{{ resolved_backup_dir }}"
+        patterns: "*.archive.gz.sha256"
+        recurse: true
+      register: baseline_checksums
+
+    - name: Registrar archivos previos
+      ansible.builtin.set_fact:
+        baseline_backup_paths: "{{ baseline_backups.files | map(attribute='path') | list }}"
+        baseline_checksum_paths: "{{ baseline_checksums.files | map(attribute='path') | list }}"
+
+    - name: Contar lineas actuales del log de backup
+      ansible.builtin.shell: |
+        if [ -f "{{ resolved_backup_log }}" ]; then
+          wc -l < "{{ resolved_backup_log }}"
+        else
+          echo 0
+        fi
+      register: baseline_log_lines
+      changed_when: false
+
+    # ============================================================
+    # 3. CALCULO DEL HORARIO OBJETIVO (CRON TEMPORAL)
+    # ============================================================
+
+    - name: Calcular timestamp objetivo (65 segundos en el futuro)
+      ansible.builtin.command:
+        argv:
+          - python3
+          - -c
+          - |
+            import datetime
+            now = datetime.datetime.now()
+            target = now + datetime.timedelta(seconds=65)
+            print(f"{target.minute:02d} {target.hour:02d} {target.strftime('%Y-%m-%d %H:%M:%S')}")
+      register: cron_time_calc
+      changed_when: false
+
+    - name: Extraer minuto, hora y fecha esperada
+      ansible.builtin.set_fact:
+        temp_cron_minute: "{{ cron_time_calc.stdout.split()[0] }}"
+        temp_cron_hour: "{{ cron_time_calc.stdout.split()[1] }}"
+        temp_cron_target_time: "{{ cron_time_calc.stdout.split()[2] }} {{ cron_time_calc.stdout.split()[3] }}"
+
+    - name: Construir comando del trabajo cron temporal
+      ansible.builtin.set_fact:
+        temp_cron_job_cmd: >-
+          {{ resolved_backup_wrapper }}
+          -e target_environment=local
+          >> {{ resolved_cron_log }} 2>&1
+
+    # ============================================================
+    # 4. CICLO DE PRUEBA CONTROLADA CON LIMPIEZA GARANTIZADA
+    # ============================================================
+
+    - name: Ejecutar prueba de cron con garantia de limpieza
+      block:
+
+        - name: Instalar entrada cron temporal
+          ansible.builtin.cron:
+            name: "{{ temp_cron_job_name }}"
+            minute: "{{ temp_cron_minute }}"
+            hour: "{{ temp_cron_hour }}"
+            job: "{{ temp_cron_job_cmd }}"
+            state: present
+          register: cron_install_res
+
+        - name: Mostrar programacion temporal instalada
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "ENTRADA CRON TEMPORAL INSTALADA"
+              - "============================================================"
+              - "Horario programado: {{ temp_cron_hour }}:{{ temp_cron_minute }}"
+              - "Hora aproximada de disparo: {{ temp_cron_target_time }}"
+              - "Job: {{ temp_cron_job_cmd }}"
+              - "Esperando ejecucion por el demonio cron..."
+              - "============================================================"
+
+        - name: Esperar a que el demonio cron ejecute el proceso y genere el checksum final
+          ansible.builtin.find:
+            paths: "{{ resolved_backup_dir }}"
+            patterns: "*.archive.gz.sha256"
+            recurse: true
+          register: current_checksums_check
+          until:
+            - (current_checksums_check.files | map(attribute='path') | list | difference(baseline_checksum_paths)) | length > 0
+          retries: 40
+          delay: 5
+          changed_when: false
+
+        - name: Identificar nuevo checksum y backup generado por cron
+          ansible.builtin.set_fact:
+            new_checksum_file: "{{ (current_checksums_check.files | map(attribute='path') | list | difference(baseline_checksum_paths)) | first }}"
+            new_backup_file: "{{ ((current_checksums_check.files | map(attribute='path') | list | difference(baseline_checksum_paths)) | first) | regex_replace('\\.sha256$', '') }}"
+
+        - name: Validar que el archivo de backup .archive.gz existe
+          ansible.builtin.stat:
+            path: "{{ new_backup_file }}"
+          register: new_backup_stat
+
+        - name: Confirmar presencia del backup
+          ansible.builtin.assert:
+            that:
+              - new_backup_stat.stat.exists
+              - new_backup_stat.stat.isreg
+              - new_backup_stat.stat.size > 0
+            fail_msg: "[ERROR] No se encontro el archivo de backup generado por cron"
+            success_msg: "[OK] Archivo de backup .archive.gz confirmado"
+
+        - name: Validar integridad SHA-256 del backup creado por cron
+          ansible.builtin.shell: |
+            cd "$(dirname "{{ new_backup_file }}")"
+            sha256sum -c "$(basename "{{ new_checksum_file }}")"
+          register: sha256_verify
+          changed_when: false
+
+        - name: Confirmar integridad valida
+          ansible.builtin.assert:
+            that:
+              - sha256_verify.rc == 0
+            fail_msg: "[ERROR] La validacion de integridad SHA-256 fallo para el backup generado por cron"
+            success_msg: "[OK] Integridad SHA-256 verificada exitosamente"
+
+        - name: Verificar registro en la bitacora de auditoria (mongodb_backup.log)
+          ansible.builtin.shell: |
+            tail -n 5 "{{ resolved_backup_log }}"
+          register: recent_log_entries
+          changed_when: false
+
+        - name: Validar estado SUCCESS en el log
+          ansible.builtin.assert:
+            that:
+              - "'result=SUCCESS' in recent_log_entries.stdout"
+              - "(new_backup_file | basename) in recent_log_entries.stdout"
+            fail_msg: "[ERROR] No se encontro la entrada de auditoria SUCCESS para el nuevo backup"
+            success_msg: "[OK] Entrada SUCCESS registrada en la bitacora de auditoria"
+
+        - name: Mostrar resultado de la prueba de cron
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "PRUEBA DE CRON COMPLETADA EXITOSAMENTE"
+              - "============================================================"
+              - "Horario probado: {{ temp_cron_hour }}:{{ temp_cron_minute }}"
+              - "Backup creado por cron: {{ new_backup_file }}"
+              - "Checksum .sha256: {{ new_checksum_file }}"
+              - "Integridad SHA-256: VALIDADA (OK)"
+              - "Bitacora mongodb_backup.log: SUCCESS"
+              - "============================================================"
+
+      always:
+        - name: Eliminar SIEMPRE la entrada cron temporal
+          ansible.builtin.cron:
+            name: "{{ temp_cron_job_name }}"
+            state: absent
+          register: cron_cleanup_res
+
+        - name: Confirmar eliminacion de la entrada cron temporal
+          ansible.builtin.debug:
+            msg: "[OK] Entrada cron temporal eliminada exitosamente. Crontab limpio."

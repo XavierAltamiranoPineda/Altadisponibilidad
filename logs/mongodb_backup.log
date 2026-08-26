@@ -1,3 +1,0 @@
-20260821_115125 | environment=local | database=prueba_ha | primary=mongo1:27017 | file=prueba_ha_20260821_115125.archive.gz | size=561 | checksum=OK | result=SUCCESS
-20260821_142801 | environment=local | database=prueba_ha | primary=mongo1:27017 | host=127.0.0.1:27017 | tools_version=100.18.0 | file=prueba_ha_20260821_142801.archive.gz | size=561 | checksum=OK | result=SUCCESS
-20260824_130507 | environment=local | database=prueba_ha | primary=mongo1:27017 | replica_set=rs0 | network=mongo_swarm_net | tools_version=100.18.0 | file=prueba_ha_20260824_130507.archive.gz | size=566 | checksum=OK | free_space_percent_before=94.68 | result=SUCCESS

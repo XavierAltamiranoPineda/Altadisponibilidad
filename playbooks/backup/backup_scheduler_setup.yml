@@ -1,25 +1,14 @@
 ---
 # ============================================================
-# CONFIGURACION DEL SCHEDULER CRON PARA RESPALDOS MONGODB
-# ============================================================
-# Configura el trabajo programado diario (02:00) para ejecutar
-# de forma no interactiva el proceso completo de respaldo:
-#   playbooks/backup/backup_process.yml
+# Playbook: Configurar Automatizacion de Respaldos (Scheduler)
 #
-# Caracteristicas del diseno:
-#   - Idempotente: ansible.builtin.cron gestiona la entrada
-#   - Exclusividad: flock -n previene ejecuciones simultaneas
-#   - Autenticacion: --vault-password-file para ejecucion no interactiva
-#   - Bitacora: Redireccion de stdout/stderr a mongodb_backup_cron.log
-#   - Multiambiente: parametrizado con target_environment
-#
-# Uso:
-#   ansible-playbook playbooks/backup/backup_scheduler_setup.yml
-#   ansible-playbook playbooks/backup/backup_scheduler_setup.yml -e target_environment=development
-#   ansible-playbook playbooks/backup/backup_scheduler_setup.yml -e target_environment=production
+# Proposito:
+#   Configura la ejecucion programada y automatica de respaldos
+#   MongoDB mediante cron y el wrapper institucional
+#   scripts/run_mongodb_backup.sh con bloqueo exclusivo via flock.
 # ============================================================
 
-- name: Configurar Scheduler Cron para Respaldos MongoDB
+- name: Configurar automatizacion de respaldos MongoDB
   hosts: localhost
   connection: local
   gather_facts: false
@@ -71,7 +60,7 @@
         success_msg: "[OK] Variables de horario ({{ backup_schedule_hour }}:{{ backup_schedule_minute }}) y bitacoras validadas"
 
     # ============================================================
-    # RESOLUCION DE RUTAS Y EJECUTABLES EN EL HOST
+    # RESOLUCION DE RUTAS Y WRAPPER EN EL HOST
     # ============================================================
 
     - name: Obtener ruta canonica del proyecto
@@ -97,35 +86,21 @@
         fail_msg: "[ERROR] No se encontro {{ resolved_project_root }}/playbooks/backup/backup_process.yml"
         success_msg: "[OK] Playbook orquestador backup_process.yml localizado"
 
-    - name: Detectar ruta del ejecutable ansible-playbook
-      ansible.builtin.shell: |
-        command -v ansible-playbook
-      register: detected_ansible_playbook
-      changed_when: false
-      failed_when: false
+    - name: Verificar estado del wrapper ejecutable de backup
+      ansible.builtin.stat:
+        path: "{{ resolved_project_root }}/scripts/run_mongodb_backup.sh"
+      register: backup_wrapper_stat
 
-    - name: Validar ejecutable ansible-playbook
+    - name: Validar existencia, tipo y permisos ejecutables del wrapper
       ansible.builtin.assert:
         that:
-          - detected_ansible_playbook.rc == 0
-          - detected_ansible_playbook.stdout | trim | length > 0
-        fail_msg: "[ERROR] No se encontro el comando 'ansible-playbook' en el PATH del sistema."
-        success_msg: "[OK] ansible-playbook detectado: {{ detected_ansible_playbook.stdout | trim }}"
-
-    - name: Detectar ruta del ejecutable flock
-      ansible.builtin.shell: |
-        command -v flock
-      register: detected_flock
-      changed_when: false
-      failed_when: false
-
-    - name: Validar ejecutable flock
-      ansible.builtin.assert:
-        that:
-          - detected_flock.rc == 0
-          - detected_flock.stdout | trim | length > 0
-        fail_msg: "[ERROR] No se encontro el comando 'flock' en el PATH del sistema."
-        success_msg: "[OK] flock detectado: {{ detected_flock.stdout | trim }}"
+          - backup_wrapper_stat.stat.exists
+          - backup_wrapper_stat.stat.isreg
+          - backup_wrapper_stat.stat.executable
+        fail_msg: >-
+          [ERROR] El wrapper '{{ resolved_project_root }}/scripts/run_mongodb_backup.sh'
+          no existe, no es un archivo regular o no tiene permisos de ejecucion.
+        success_msg: "[OK] Wrapper scripts/run_mongodb_backup.sh validado y ejecutable"
 
     # ============================================================
     # VALIDACION DE CLAVE VAULT NO INTERACTIVA
@@ -152,14 +127,8 @@
           - vault_password_stat.stat.mode in ['0600', '0400']
         fail_msg: >-
           [ERROR] El archivo de clave Vault '{{ ansible_vault_password_file }}' no es valido.
-          Debe existir como archivo regular con permisos 0600 (chmod 0600 {{ ansible_vault_password_file }}).
+          Debe existir como archivo regular con permisos 0600 o 0400 (chmod 0600 {{ ansible_vault_password_file }}).
         success_msg: "[OK] Archivo de password de Vault validado con permisos seguros ({{ vault_password_stat.stat.mode }})"
-
-    - name: Obtener ruta canonica del archivo de password de Vault
-      ansible.builtin.command:
-        cmd: "realpath {{ ansible_vault_password_file }}"
-      register: canonical_vault_password_file
-      changed_when: false
 
     # ============================================================
     # PREPARACION DE DIRECTORIOS Y COMANDO CRON
@@ -177,22 +146,17 @@
       register: canonical_backup_log_root
       changed_when: false
 
-    - name: Definir rutas absolutas de lock y log de cron
+    - name: Definir rutas absolutas de wrapper y log de cron
       ansible.builtin.set_fact:
-        resolved_lock_file: "{{ canonical_backup_log_root.stdout }}/{{ backup_lock_filename }}"
+        resolved_backup_wrapper: "{{ resolved_project_root }}/scripts/run_mongodb_backup.sh"
         resolved_cron_log: "{{ canonical_backup_log_root.stdout }}/{{ backup_cron_log_filename }}"
-        resolved_vault_pass_file: "{{ canonical_vault_password_file.stdout }}"
-        resolved_ansible_playbook_bin: "{{ detected_ansible_playbook.stdout | trim }}"
-        resolved_flock_bin: "{{ detected_flock.stdout | trim }}"
+        resolved_lock_file: "{{ canonical_backup_log_root.stdout }}/{{ backup_lock_filename }}"
 
     - name: Construir comando del trabajo cron
       ansible.builtin.set_fact:
         backup_cron_job_cmd: >-
-          {{ resolved_flock_bin }} -n {{ resolved_lock_file }}
-          {{ resolved_ansible_playbook_bin }}
-          {{ resolved_project_root }}/playbooks/backup/backup_process.yml
+          {{ resolved_backup_wrapper }}
           -e target_environment={{ target_environment }}
-          --vault-password-file {{ resolved_vault_pass_file }}
           >> {{ resolved_cron_log }} 2>&1
 
     # ============================================================
@@ -220,9 +184,10 @@
           - "Ambiente: {{ environment_name }}"
           - "Scheduler: {{ backup_scheduler }}"
           - "Horario: {{ backup_schedule_hour }}:{{ backup_schedule_minute }} (Diario)"
-          - "Proceso: {{ resolved_project_root }}/playbooks/backup/backup_process.yml"
-          - "Lockfile: {{ resolved_lock_file }}"
+          - "Wrapper: {{ resolved_backup_wrapper }}"
+          - "Lockfile: {{ resolved_lock_file }} (gestionado internamente por el wrapper)"
           - "Log cron: {{ resolved_cron_log }}"
-          - "Vault: Configurado de forma no interactiva"
+          - "Vault: Configurado de forma no interactiva (0600)"
+          - "Linea Cron: {{ backup_schedule_minute }} {{ backup_schedule_hour }} * * * {{ backup_cron_job_cmd }}"
           - "Estado: ACTIVO"
           - "============================================================"
