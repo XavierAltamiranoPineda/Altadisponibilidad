@@ -1,4 +1,10 @@
 ---
+# ============================================================
+# Detector runtime TLS mode-aware y seguro para MongoDB
+# Prioridad 1: Conexion autenticada via TLS con CA publica (/run/mongo-ca/mongo_ca.pem)
+# Prioridad 2 (Fallback diagnostico): Conexion plaintext para bootstrap/recovery disabled
+# ============================================================
+
 - name: Inicializar clasificacion TLS runtime
   ansible.builtin.set_fact:
     mongo_tls_runtime_modes: {}
@@ -12,6 +18,8 @@
       - --rm
       - --network
       - "{{ mongo_network }}"
+      - -v
+      - "{{ mongo_tls_ca_canonical | default(mongo_tls_ca_cert_path) }}:/run/mongo-ca/mongo_ca.pem:ro"
       - --env
       - MONGO_ADMIN_USER
       - --env
@@ -24,22 +32,63 @@
       - |
           const user = process.env.MONGO_ADMIN_USER;
           const pass = process.env.MONGO_ADMIN_PASSWORD;
-          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@{{ item }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=5000`;
-          let result;
-          try {
-            const db = connect(uri);
-            const opts = db.adminCommand({getCmdLineOpts: 1}).parsed;
-            const rawMode = opts.net?.tls?.mode;
-            let classification = 'unknown';
+          const node = '{{ item }}';
+          const caFile = '/run/mongo-ca/mongo_ca.pem';
+          let result = { node: node, classification: 'unknown', tlsMode: null, probe: 'none' };
+
+          function classifyMode(rawMode) {
             if (rawMode === undefined || rawMode === null || rawMode === '' || rawMode === 'disabled') {
-              classification = 'disabled';
+              return 'disabled';
             } else if (rawMode === 'allowTLS') {
-              classification = 'allowTLS';
+              return 'allowTLS';
+            } else if (rawMode === 'preferTLS') {
+              return 'preferTLS';
+            } else if (rawMode === 'requireTLS') {
+              return 'requireTLS';
             }
-            result = {node: '{{ item }}', classification, tlsMode: rawMode ?? null};
-          } catch (err) {
-            result = {node: '{{ item }}', classification: 'unknown', tlsMode: null};
+            return 'unknown';
           }
+
+          // 1. Intento primario: TLS con validacion estricta de CA
+          let tlsSuccess = false;
+          try {
+            const tlsUri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${node}:27017/admin?directConnection=true&serverSelectionTimeoutMS=4000&tls=true&tlsCAFile=${caFile}`;
+            const db = connect(tlsUri);
+            const opts = db.adminCommand({ getCmdLineOpts: 1 }).parsed;
+            const rawMode = opts.net?.tls?.mode;
+            result = {
+              node: node,
+              classification: classifyMode(rawMode),
+              tlsMode: rawMode ?? null,
+              probe: 'tls'
+            };
+            tlsSuccess = true;
+          } catch (tlsErr) {
+            result.tls_error = (tlsErr.message || String(tlsErr))
+              .replace(new RegExp(user, 'g'), '[REDACTED]')
+              .replace(new RegExp(pass, 'g'), '[REDACTED]');
+          }
+
+          // 2. Fallback diagnostico: Plaintext solo si TLS no conecto (para bootstrap/recovery disabled)
+          if (!tlsSuccess) {
+            try {
+              const plainUri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@${node}:27017/admin?directConnection=true&serverSelectionTimeoutMS=4000`;
+              const db = connect(plainUri);
+              const opts = db.adminCommand({ getCmdLineOpts: 1 }).parsed;
+              const rawMode = opts.net?.tls?.mode;
+              result = {
+                node: node,
+                classification: classifyMode(rawMode),
+                tlsMode: rawMode ?? null,
+                probe: 'plaintext_fallback'
+              };
+            } catch (plainErr) {
+              result.plaintext_error = (plainErr.message || String(plainErr))
+                .replace(new RegExp(user, 'g'), '[REDACTED]')
+                .replace(new RegExp(pass, 'g'), '[REDACTED]');
+            }
+          }
+
           print('TLS_RUNTIME_JSON=' + JSON.stringify(result));
   environment:
     MONGO_ADMIN_USER: "{{ mongo_admin_user }}"

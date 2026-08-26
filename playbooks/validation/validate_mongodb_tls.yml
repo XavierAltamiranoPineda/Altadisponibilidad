@@ -11,7 +11,7 @@
 
   vars:
     tls_target_environment: "{{ target_environment | default('local') }}"
-    mongo_tls_expected_mode: "{{ expected_tls_mode | default('allowTLS') }}"
+    mongo_tls_expected_mode: "{{ expected_tls_mode | default(mongo_tls_deployment_mode) }}"
     mongo_network: "mongo_swarm_net"
     mongo_tls_service_names:
       - mongo1

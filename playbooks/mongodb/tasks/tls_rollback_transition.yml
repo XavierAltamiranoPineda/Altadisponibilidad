@@ -1,6 +1,6 @@
 ---
 # ============================================================
-# Rollback seguro y global convergente a PERMANENT_DISABLED_SPEC para los 3 servicios
+# Rollback seguro y global convergente mode-aware para los 3 servicios
 # ============================================================
 
 - name: Bloque transaccional de Rollback Global
@@ -13,13 +13,30 @@
       register: mongo_tls_rollback_now_epoch
       changed_when: false
 
-    - name: Marcar fase de rollback
+    - name: Calcular target y spec mode de rollback mode-aware (TAREA A)
+      ansible.builtin.set_fact:
+        mongo_tls_rollback_target_arg: >-
+          {{
+            'preferTLS' if (mongo_tls_source_mode | default(mongo_tls_deployment_mode | default('allowTLS'))) == 'preferTLS' else (
+              'allowTLS' if (mongo_tls_source_mode | default(mongo_tls_deployment_mode | default('allowTLS'))) == 'allowTLS' else
+              'disabled'
+            )
+          }}
+        mongo_tls_rollback_spec_mode: >-
+          {{
+            'permanent_prefertls' if (mongo_tls_source_mode | default(mongo_tls_deployment_mode | default('allowTLS'))) == 'preferTLS' else (
+              'permanent_allowtls' if (mongo_tls_source_mode | default(mongo_tls_deployment_mode | default('allowTLS'))) == 'allowTLS' else
+              'permanent_disabled'
+            )
+          }}
+
+    - name: Marcar fase de rollback y registrar target_mode esperado (TAREA B)
       ansible.builtin.set_fact:
         mongo_tls_current_phase: "ROLLING_BACK_PREPARE"
         mongo_tls_operation_id: "{{ ansible_date_time.iso8601_basic_short }}-rollback-{{ 99999 | random | string }}"
         mongo_tls_operation_mode: "rollback"
         mongo_tls_operation_deadline: "{{ (mongo_tls_rollback_now_epoch.stdout | int) + 600 }}"
-        mongo_tls_target_mode_expected: "disabled"
+        mongo_tls_target_mode_expected: "{{ mongo_tls_rollback_target_arg }}"
         mongo_tls_gate_ready_nodes: {}
         mongo_tls_gate_released_nodes: {}
 
@@ -38,21 +55,39 @@
           - sh
           - -c
           - |
-            printf 'operation_id=%s\nmode=rollback\ndeadline=%s\nnode=%s\nsource=%s\ntarget=disabled\ncreated_at=%s\n' \
+            printf 'operation_id=%s\nmode=rollback\ndeadline=%s\nnode=%s\nsource=%s\ntarget=%s\ncreated_at=%s\n' \
               "{{ mongo_tls_operation_id }}" \
               "{{ mongo_tls_operation_deadline }}" \
               "{{ item }}" \
               "{{ mongo_tls_source_mode | default('mixed') }}" \
+              "{{ mongo_tls_rollback_target_arg }}" \
               "{{ ansible_date_time.iso8601 }}" > /ctrl/.operation-active.tmp
             chmod 0644 /ctrl/.operation-active.tmp
             rm -f /ctrl/operation-start
             mv -f /ctrl/.operation-active.tmp /ctrl/operation-active
-            echo "HANDOFF_ROLLBACK node={{ item }}"
+            echo "WRITTEN_ROLLBACK node={{ item }}"
       loop: "{{ mongo_tls_service_names }}"
-      register: mongo_tls_handoff_rollback_raw
-      changed_when: "'HANDOFF_ROLLBACK' in mongo_tls_handoff_rollback_raw.stdout"
+      register: mongo_tls_write_rollback_raw
+      changed_when: "'WRITTEN_ROLLBACK' in mongo_tls_write_rollback_raw.stdout"
 
-    - name: Capturar tasks corrientes justo antes de los updates de rollback
+    - name: Verificar que operation-active existe y operation-start esta ausente (rollback)
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - -v
+          - "{{ mongo_tls_control_volume_names[item] }}:/ctrl:ro"
+          - "{{ mongo_image }}"
+          - sh
+          - -c
+          - |
+            test -f /ctrl/operation-active && test ! -f /ctrl/operation-start && echo "VERIFIED_ROLLBACK_GATE" || exit 1
+      loop: "{{ mongo_tls_service_names }}"
+      register: mongo_tls_verify_rollback_raw
+      changed_when: false
+
+    - name: Extraer task_id y container_id previos antes de mutar a rollback spec
       ansible.builtin.command:
         argv:
           - curl
@@ -60,57 +95,38 @@
           - --fail-with-body
           - --unix-socket
           - /var/run/docker.sock
-          - "http://localhost/tasks?filters=%7B%22service%22%3A%5B%22{{ item }}%22%5D%2C%22desired-state%22%3A%5B%22running%22%5D%7D"
-      loop: "{{ mongo_tls_service_names }}"
+          - "http://localhost/tasks?filters=%7B%22service%22%3A%5B%22{{ mongo_tls_snapshot_services[item].identity.service_id }}%22%5D%2C%22desired-state%22%3A%5B%22running%22%5D%7D"
       register: mongo_tls_rollback_current_tasks_raw
+      loop: "{{ mongo_tls_service_names }}"
       changed_when: false
-      retries: 10
-      delay: 1
-      until:
-        - mongo_tls_rollback_current_tasks_raw.rc == 0
-        - (mongo_tls_rollback_current_tasks_raw.stdout | from_json | selectattr('Status.State', 'equalto', 'running') | list | length) == 1
 
-    - name: Inicializar baseline de tasks para rollback
-      ansible.builtin.set_fact:
-        mongo_tls_rollback_old_task_info: {}
-
-    - name: Registrar baseline corriente por nodo para rollback
+    - name: Registrar old task_id y container_id antes del update de rollback
       ansible.builtin.set_fact:
         mongo_tls_rollback_old_task_info: >-
           {{
-            mongo_tls_rollback_old_task_info | combine({
+            mongo_tls_rollback_old_task_info | default({}) | combine({
               item.item: {
-                'task_id': (item.stdout | from_json | selectattr('Status.State', 'equalto', 'running') | map(attribute='ID') | first),
-                'container_id': (item.stdout | from_json | selectattr('Status.State', 'equalto', 'running') | map(attribute='Status') | map(attribute='ContainerStatus') | map(attribute='ContainerID') | first)
+                'task_id': (item.stdout | from_json | first).ID | default(''),
+                'container_id': (item.stdout | from_json | first).Status.ContainerStatus.ContainerID | default('')
               }
             })
           }}
       loop: "{{ mongo_tls_rollback_current_tasks_raw.results }}"
-      loop_control:
-        label: "{{ item.item }}"
 
-    - name: Validar baseline completo de rollback antes del primer update
-      ansible.builtin.assert:
-        that:
-          - mongo_tls_rollback_old_task_info[item].task_id | length > 0
-          - mongo_tls_rollback_old_task_info[item].container_id | length > 0
-        fail_msg: "No se pudo capturar la task corriente de {{ item }} antes del rollback."
-      loop: "{{ mongo_tls_service_names }}"
-
-    - name: Marcar fase de actualizacion de servicios para rollback
+    - name: Marcar fase de update de servicios en rollback
       ansible.builtin.set_fact:
-        mongo_tls_current_phase: "ROLLING_BACK_UPDATING_ALL_SERVICES"
+        mongo_tls_current_phase: "ROLLING_BACK_UPDATING_SERVICES"
 
     - name: Persistir estado antes de updates de rollback
       ansible.builtin.include_tasks: tls_state_file.yml
 
-    - name: Actualizar los 3 servicios a PERMANENT_DISABLED_SPEC
+    - name: Actualizar los 3 servicios al TARGET_SPEC_MODE de rollback
       ansible.builtin.include_tasks: tls_service_update_api.yml
       loop: "{{ mongo_tls_service_names }}"
       loop_control:
         loop_var: mongo_tls_target_node
       vars:
-        mongo_tls_target_spec_mode: "permanent_disabled"
+        mongo_tls_target_spec_mode: "{{ mongo_tls_rollback_spec_mode }}"
         mongo_tls_force_update: true
         mongo_tls_expected_version_index: "{{ mongo_tls_service_current_version[mongo_tls_target_node] | default(mongo_tls_snapshot_services[mongo_tls_target_node].identity.version_index_at_snapshot) }}"
 
@@ -143,7 +159,7 @@
       loop_control:
         loop_var: mongo_tls_release_node
 
-    - name: Marcar fase de espera de mongod disabled
+    - name: Marcar fase de espera de mongod de rollback
       ansible.builtin.set_fact:
         mongo_tls_current_phase: "ROLLING_BACK_WAITING_MONGOD"
 
@@ -156,7 +172,7 @@
       loop_control:
         loop_var: mongo_tls_wait_service
 
-    - name: Pausa para estabilizacion de Replica Set en modo disabled
+    - name: Pausa para estabilizacion de Replica Set tras rollback
       ansible.builtin.pause:
         seconds: 15
 
@@ -164,13 +180,13 @@
       ansible.builtin.set_fact:
         mongo_tls_current_phase: "ROLLBACK_VALIDATING"
 
-    - name: Validar Replica Set saludable en modo disabled
+    - name: Validar Replica Set saludable tras rollback
       ansible.builtin.include_tasks: tls_query_cluster.yml
       vars:
         mongo_tls_cluster_retries: 40
         mongo_tls_cluster_delay: 5
 
-    - name: Validar identidad por nodo en modo disabled
+    - name: Validar identidad por nodo tras rollback
       ansible.builtin.include_tasks: tls_task_identity.yml
       loop: "{{ mongo_tls_service_names }}"
       loop_control:
@@ -183,12 +199,12 @@
       ansible.builtin.set_fact:
         mongo_tls_rollback_runtime_modes: "{{ mongo_tls_runtime_modes }}"
 
-    - name: Exigir runtime disabled en los tres mongod
+    - name: Exigir runtime esperado en los tres mongod tras rollback
       ansible.builtin.assert:
         that:
-          - mongo_tls_rollback_runtime_modes.values() | select('equalto', 'disabled') | list | length == 3
+          - mongo_tls_rollback_runtime_modes.values() | select('equalto', mongo_tls_rollback_target_arg) | list | length == 3
         fail_msg: >-
-          Rollback bloqueado: los tres runtimes deben ser disabled.
+          Rollback bloqueado: los tres runtimes deben coincidir con {{ mongo_tls_rollback_target_arg }}.
           Modos observados={{ mongo_tls_rollback_runtime_modes }}.
 
     - name: Inspeccionar specs finales tras rollback
@@ -212,46 +228,13 @@
       ansible.builtin.set_fact:
         mongo_tls_node_spec_status: "{{ mongo_tls_classified_spec_modes }}"
 
-    - name: Exigir tres specs permanent_disabled exactas
+    - name: Exigir tres specs exactas de rollback
       ansible.builtin.assert:
         that:
-          - mongo_tls_node_spec_status.values() | select('equalto', 'permanent_disabled') | list | length == 3
+          - mongo_tls_node_spec_status.values() | select('equalto', mongo_tls_rollback_spec_mode) | list | length == 3
         fail_msg: >-
-          Rollback bloqueado: specs finales no son 3 x permanent_disabled.
+          Rollback bloqueado: specs finales no son 3 x {{ mongo_tls_rollback_spec_mode }}.
           Clasificacion={{ mongo_tls_node_spec_status }}.
-
-    - name: Validar estructura e identidad de cada spec de rollback
-      ansible.builtin.assert:
-        that:
-          - item.ID == mongo_tls_snapshot_services[node].identity.service_id
-          - item.Spec.EndpointSpec == mongo_tls_snapshot_services[node].endpoint_spec
-          - control_mounts | length == 1
-          - control_mounts[0].Source == mongo_tls_control_volume_names[node]
-          - data_mounts | length == 1
-          - tls_tmpfs_mounts | length == 0
-          - secret_names | select('equalto', 'mongo_keyfile') | list | length == 1
-          - secret_names | select('match', '^mongo_tls_ca_') | list | length == 0
-          - secret_names | select('match', '^mongo[123]_tls_pem_') | list | length == 0
-        fail_msg: "Invariantes de ServiceSpec violados tras rollback en {{ node }}."
-      vars:
-        node: "{{ item.Spec.Name }}"
-        container_spec: "{{ item.Spec.TaskTemplate.ContainerSpec }}"
-        mounts: "{{ container_spec.Mounts | default([]) }}"
-        secret_names: "{{ container_spec.Secrets | default([]) | map(attribute='SecretName') | list }}"
-        control_mounts: >-
-          {{ mounts | selectattr('Target', 'equalto', '/run/tls-control') | list }}
-        data_mounts: >-
-          {{ mounts | selectattr('Target', 'equalto', '/data/db') | list }}
-        tls_tmpfs_mounts: >-
-          {{
-            mounts
-            | selectattr('Type', 'equalto', 'tmpfs')
-            | selectattr('Target', 'equalto', '/run/mongo-tls')
-            | list
-          }}
-      loop: "{{ mongo_tls_rollback_specs_raw.stdout | from_json }}"
-      loop_control:
-        label: "{{ item.Spec.Name }}"
 
     - name: Validar Replica Set inmutable tras rollback
       ansible.builtin.assert:

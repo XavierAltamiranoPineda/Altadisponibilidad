@@ -10,9 +10,9 @@
       {{
         mongo_tls_classified_spec_modes | combine({
           node: (
-            'permanent_allowtls' if (
+            'permanent_requiretls' if (
               permanent_wrapper and
-              container_args[-2] == 'allowTLS' and
+              container_args[-2] == 'requireTLS' and
               container_args[-1] == node and
               has_control_mount and
               has_keyfile and
@@ -21,24 +21,48 @@
               has_tls_tmpfs and
               not has_foreign_node_pem
             ) else (
-              'permanent_disabled' if (
+              'permanent_prefertls' if (
                 permanent_wrapper and
-                container_args[-2] == 'disabled' and
+                container_args[-2] == 'preferTLS' and
                 container_args[-1] == node and
                 has_control_mount and
                 has_keyfile and
-                not has_tls_ca and
-                not has_any_node_pem and
-                not has_tls_tmpfs
+                has_tls_ca and
+                has_node_pem and
+                has_tls_tmpfs and
+                not has_foreign_node_pem
               ) else (
-                'historical_disabled' if (
-                  command != ['/bin/sh'] and
-                  not has_control_mount and
-                  not has_tls_ca and
-                  not has_any_node_pem and
-                  not has_tls_tmpfs and
-                  not has_tls_mode_argument
-                ) else 'unknown'
+                'permanent_allowtls' if (
+                  permanent_wrapper and
+                  container_args[-2] == 'allowTLS' and
+                  container_args[-1] == node and
+                  has_control_mount and
+                  has_keyfile and
+                  has_tls_ca and
+                  has_node_pem and
+                  has_tls_tmpfs and
+                  not has_foreign_node_pem
+                ) else (
+                  'permanent_disabled' if (
+                    permanent_wrapper and
+                    container_args[-2] == 'disabled' and
+                    container_args[-1] == node and
+                    has_control_mount and
+                    has_keyfile and
+                    not has_tls_ca and
+                    not has_any_node_pem and
+                    not has_tls_tmpfs
+                  ) else (
+                    'historical_disabled' if (
+                      command != ['/bin/sh'] and
+                      not has_control_mount and
+                      not has_tls_ca and
+                      not has_any_node_pem and
+                      not has_tls_tmpfs and
+                      not has_tls_mode_argument
+                    ) else 'unknown'
+                  )
+                )
               )
             )
           )
@@ -72,7 +96,6 @@
       {{ secret_names | select('match', '^' ~ node ~ '_tls_pem_') | list | length > 0 }}
     has_any_node_pem: >-
       {{ secret_names | select('match', '^mongo[123]_tls_pem_') | list | length > 0 }}
-    # PEM de un nodo distinto mezclado en esta spec => spec corrupta => unknown
     has_foreign_node_pem: >-
       {{
         (secret_names

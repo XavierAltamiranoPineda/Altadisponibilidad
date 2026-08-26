@@ -140,25 +140,38 @@
   register: mongo_tls_validation_volumes_raw
   changed_when: false
 
-- name: Validar snapshot lógico cuando existe
+- name: Normalizar servicios inspeccionados para validacion
+  ansible.builtin.set_fact:
+    mongo_tls_validated_services_map: >-
+      {{
+        mongo_tls_validated_services_map | default({}) | combine({
+          svc_obj.Spec.Name: {
+            'service_id': svc_obj.ID | default(''),
+            'image': svc_obj.Spec.TaskTemplate.ContainerSpec.Image | default(''),
+            'endpoint_spec': svc_obj.Spec.EndpointSpec | default({}),
+            'labels': svc_obj.Spec.Labels | default({})
+          }
+        })
+      }}
+  vars:
+    raw_list: "{{ item.stdout | from_json }}"
+    svc_obj: "{{ (raw_list | first) if (raw_list is iterable and raw_list | length > 0) else raw_list }}"
+  loop: "{{ mongo_tls_validation_services_raw.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Validar snapshot logico e invariantes de servicio
   ansible.builtin.assert:
     that:
       - mongo_tls_cluster_status.config == mongo_tls_initial_cluster_status.config
       - (mongo_tls_validation_volumes_raw.stdout | from_json) == mongo_tls_initial_volumes
-      - (mongo_tls_validation_services_raw.results[0].stdout | from_json | first).ID == mongo_tls_initial_services.mongo1.ID
-      - (mongo_tls_validation_services_raw.results[1].stdout | from_json | first).ID == mongo_tls_initial_services.mongo2.ID
-      - (mongo_tls_validation_services_raw.results[2].stdout | from_json | first).ID == mongo_tls_initial_services.mongo3.ID
-      - (mongo_tls_validation_services_raw.results[0].stdout | from_json | first).Spec.TaskTemplate.ContainerSpec.Image == mongo_tls_initial_services.mongo1.Spec.TaskTemplate.ContainerSpec.Image
-      - (mongo_tls_validation_services_raw.results[1].stdout | from_json | first).Spec.TaskTemplate.ContainerSpec.Image == mongo_tls_initial_services.mongo2.Spec.TaskTemplate.ContainerSpec.Image
-      - (mongo_tls_validation_services_raw.results[2].stdout | from_json | first).Spec.TaskTemplate.ContainerSpec.Image == mongo_tls_initial_services.mongo3.Spec.TaskTemplate.ContainerSpec.Image
-      - (mongo_tls_validation_services_raw.results[0].stdout | from_json | first).Spec.EndpointSpec == mongo_tls_initial_services.mongo1.Spec.EndpointSpec
-      - (mongo_tls_validation_services_raw.results[1].stdout | from_json | first).Spec.EndpointSpec == mongo_tls_initial_services.mongo2.Spec.EndpointSpec
-      - (mongo_tls_validation_services_raw.results[2].stdout | from_json | first).Spec.EndpointSpec == mongo_tls_initial_services.mongo3.Spec.EndpointSpec
-      - (mongo_tls_validation_services_raw.results[0].stdout | from_json | first).Spec.Labels == mongo_tls_initial_services.mongo1.Spec.Labels
-      - (mongo_tls_validation_services_raw.results[1].stdout | from_json | first).Spec.Labels == mongo_tls_initial_services.mongo2.Spec.Labels
-      - (mongo_tls_validation_services_raw.results[2].stdout | from_json | first).Spec.Labels == mongo_tls_initial_services.mongo3.Spec.Labels
-    fail_msg: "rs.conf(), volumen, identidad, imagen, puerto o labels cambiaron."
-  when: mongo_tls_initial_services is defined
+      - mongo_tls_validated_services_map[item].service_id == mongo_tls_snapshot_services[item].identity.service_id
+      - mongo_tls_validated_services_map[item].image == mongo_tls_snapshot_services[item].container_spec.Image
+      - mongo_tls_validated_services_map[item].endpoint_spec == mongo_tls_snapshot_services[item].endpoint_spec
+      - mongo_tls_validated_services_map[item].labels == mongo_tls_snapshot_services[item].labels
+    fail_msg: "Invariante de snapshot violado en {{ item }} (service_id, imagen, endpoint_spec o labels cambiaron)."
+  loop: "{{ mongo_tls_service_names }}"
+  when: mongo_tls_snapshot_services is defined and mongo_tls_initial_cluster_status is defined
 
 - name: Mostrar validación TLS final
   ansible.builtin.debug:

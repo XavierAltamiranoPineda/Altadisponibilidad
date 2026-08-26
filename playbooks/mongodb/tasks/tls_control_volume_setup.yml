@@ -110,11 +110,12 @@
       - sh
       - -c
       - |
-        printf 'operation_id=%s\nmode=forward\ndeadline=%s\nnode=%s\nsource=%s\ntarget=allowTLS\ncreated_at=%s\n' \
+        printf 'operation_id=%s\nmode=forward\ndeadline=%s\nnode=%s\nsource=%s\ntarget=%s\ncreated_at=%s\n' \
           "{{ mongo_tls_operation_id }}" \
           "{{ mongo_tls_operation_deadline }}" \
           "{{ item }}" \
-          "{{ mongo_tls_source_mode | default('disabled') }}" \
+          "{{ mongo_tls_source_mode | default('allowTLS') }}" \
+          "{{ mongo_tls_target_mode_expected | default('preferTLS') }}" \
           "{{ ansible_date_time.iso8601 }}" > /ctrl/.operation-active.tmp
         chmod 0644 /ctrl/.operation-active.tmp
         rm -f /ctrl/operation-start

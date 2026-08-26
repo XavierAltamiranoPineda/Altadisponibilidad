@@ -102,7 +102,15 @@
             'SecretID': mongo_tls_node_pem_secret_ids[mongo_tls_target_node],
             'SecretName': mongo_tls_target_node ~ '_tls_pem_' ~ mongo_tls_node_secret_version
           } -%}
-      {%- if mongo_tls_target_spec_mode == 'permanent_allowtls' -%}
+      {%- if mongo_tls_target_spec_mode == 'permanent_requiretls' -%}
+        {%- set final_mounts = mongo_tls_base_mounts + [control_mount, tmpfs_mount] -%}
+        {%- set final_secrets = [mongo_tls_keyfile_secret_ref, ca_sec, node_pem_sec] -%}
+        {%- set target_tls_arg = 'requireTLS' -%}
+      {%- elif mongo_tls_target_spec_mode == 'permanent_prefertls' -%}
+        {%- set final_mounts = mongo_tls_base_mounts + [control_mount, tmpfs_mount] -%}
+        {%- set final_secrets = [mongo_tls_keyfile_secret_ref, ca_sec, node_pem_sec] -%}
+        {%- set target_tls_arg = 'preferTLS' -%}
+      {%- elif mongo_tls_target_spec_mode == 'permanent_allowtls' -%}
         {%- set final_mounts = mongo_tls_base_mounts + [control_mount, tmpfs_mount] -%}
         {%- set final_secrets = [mongo_tls_keyfile_secret_ref, ca_sec, node_pem_sec] -%}
         {%- set target_tls_arg = 'allowTLS' -%}

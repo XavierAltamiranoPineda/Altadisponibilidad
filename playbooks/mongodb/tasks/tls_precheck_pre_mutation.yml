@@ -202,7 +202,10 @@
   ansible.builtin.set_fact:
     mongo_tls_pmc_specs_ok: >-
       {{
-        mongo_tls_classified_spec_modes.values() | list | sort == ['historical_disabled', 'historical_disabled', 'historical_disabled']
+        (mongo_tls_classified_spec_modes.values() | list | sort == ['historical_disabled', 'historical_disabled', 'historical_disabled'] and (mongo_tls_source_mode_initial | default('allowTLS')) == 'disabled') or
+        (mongo_tls_classified_spec_modes.values() | list | sort == ['permanent_disabled', 'permanent_disabled', 'permanent_disabled'] and (mongo_tls_source_mode_initial | default('allowTLS')) == 'disabled') or
+        (mongo_tls_classified_spec_modes.values() | list | sort == ['permanent_allowtls', 'permanent_allowtls', 'permanent_allowtls'] and (mongo_tls_source_mode_initial | default('allowTLS')) == 'allowTLS') or
+        (mongo_tls_classified_spec_modes.values() | list | sort == ['permanent_prefertls', 'permanent_prefertls', 'permanent_prefertls'] and (mongo_tls_source_mode_initial | default('allowTLS')) == 'preferTLS')
       }}
     mongo_tls_pmc_versions_ok: >-
       {{
@@ -241,9 +244,9 @@
       {{ not (mongo_tls_pmc_any_control_volume | bool) }}
     mongo_tls_pmc_runtime_ok: >-
       {{
-        mongo_tls_pmc_runtime_modes.mongo1 | default('unknown') == 'disabled' and
-        mongo_tls_pmc_runtime_modes.mongo2 | default('unknown') == 'disabled' and
-        mongo_tls_pmc_runtime_modes.mongo3 | default('unknown') == 'disabled'
+        mongo_tls_pmc_runtime_modes.mongo1 | default('unknown') == (mongo_tls_source_mode_initial | default('allowTLS')) and
+        mongo_tls_pmc_runtime_modes.mongo2 | default('unknown') == (mongo_tls_source_mode_initial | default('allowTLS')) and
+        mongo_tls_pmc_runtime_modes.mongo3 | default('unknown') == (mongo_tls_source_mode_initial | default('allowTLS'))
       }}
     mongo_tls_pmc_rs_ok: >-
       {{ mongo_tls_pmc_rs.healthy | bool }}

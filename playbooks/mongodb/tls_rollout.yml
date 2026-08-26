@@ -1,6 +1,6 @@
 ---
 # ============================================================
-# ORQUESTACION SEGURA DE TRANSICION TLS PARA MONGODB (ETAPA 3)
+# ORQUESTACION SEGURA DE TRANSICION TLS PARA MONGODB
 # Implementa GATED_RESTART con dos specs permanentes
 # ============================================================
 
@@ -62,10 +62,20 @@
 
         - name: Evaluar homogeneidad del cluster para recovery
           ansible.builtin.set_fact:
+            mongo_tls_rec_specs_all_requiretls: "{{ mongo_tls_rec_spec_modes.values() | select('equalto', 'permanent_requiretls') | list | length == 3 }}"
+            mongo_tls_rec_specs_all_prefertls: "{{ mongo_tls_rec_spec_modes.values() | select('equalto', 'permanent_prefertls') | list | length == 3 }}"
             mongo_tls_rec_specs_all_allowtls: "{{ mongo_tls_rec_spec_modes.values() | select('equalto', 'permanent_allowtls') | list | length == 3 }}"
             mongo_tls_rec_specs_all_disabled: "{{ mongo_tls_rec_spec_modes.values() | select('equalto', 'permanent_disabled') | list | length == 3 }}"
+            mongo_tls_rec_runtime_all_requiretls: "{{ mongo_tls_rec_runtime_modes.values() | select('equalto', 'requireTLS') | list | length == 3 }}"
+            mongo_tls_rec_runtime_all_prefertls: "{{ mongo_tls_rec_runtime_modes.values() | select('equalto', 'preferTLS') | list | length == 3 }}"
             mongo_tls_rec_runtime_all_allowtls: "{{ mongo_tls_rec_runtime_modes.values() | select('equalto', 'allowTLS') | list | length == 3 }}"
             mongo_tls_rec_runtime_all_disabled: "{{ mongo_tls_rec_runtime_modes.values() | select('equalto', 'disabled') | list | length == 3 }}"
+            mongo_tls_rec_rs_valid: >-
+              {{
+                mongo_tls_cluster_status.healthy | bool and
+                (mongo_tls_cluster_status.members | selectattr('stateStr', 'equalto', 'PRIMARY') | list | length == 1) and
+                (mongo_tls_cluster_status.members | selectattr('stateStr', 'equalto', 'SECONDARY') | list | length == 2)
+              }}
 
         - name: Diagnostico Recovery
           ansible.builtin.debug:
@@ -76,7 +86,95 @@
               rs_healthy: "{{ mongo_tls_cluster_status.healthy }}"
               confirm_required: "confirm_recovery_cleanup=true"
 
-        # RAMA A: HOMOGENEOUS_ALLOWTLS
+        # RAMA A1: HOMOGENEOUS_REQUIRETLS
+        - name: Recovery — Homogeneous requireTLS confirmado
+          when:
+            - mongo_tls_cluster_status.healthy | bool
+            - mongo_tls_rec_specs_all_requiretls | bool
+            - mongo_tls_rec_runtime_all_requiretls | bool
+          block:
+            - name: Ejecutar cleanup de recovery requireTLS
+              when: confirm_recovery_cleanup | default(false) | bool
+              block:
+                - name: Limpiar control volumes en recovery requireTLS
+                  ansible.builtin.include_tasks: tasks/tls_control_volume_cleanup.yml
+                  vars:
+                    mongo_tls_force_cleanup: true
+
+                - name: Sincronizar vars/local.yml a requireTLS
+                  ansible.builtin.copy:
+                    dest: "{{ mongo_tls_local_vars_path }}"
+                    mode: "0644"
+                    content: >-
+                      {{
+                        lookup('ansible.builtin.file', mongo_tls_local_vars_path, rstrip=false)
+                        | regex_replace('(?m)^mongo_tls_enabled:.*$', 'mongo_tls_enabled: true')
+                        | regex_replace('(?m)^mongo_tls_clients_enabled:.*$', 'mongo_tls_clients_enabled: true')
+                        | regex_replace('(?m)^mongo_tls_target_mode:.*$', 'mongo_tls_target_mode: "requireTLS"')
+                        | regex_replace('(?m)^mongo_tls_deployment_mode:.*$', 'mongo_tls_deployment_mode: "requireTLS"')
+                      }}
+
+                - name: Marcar estado SUCCESS en recovery requireTLS
+                  ansible.builtin.set_fact:
+                    mongo_tls_current_phase: "SUCCESS"
+                    mongo_tls_needs_manual_recovery: false
+
+                - name: Persistir state file en recovery
+                  ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+                - name: Finalizar recovery exitoso requireTLS
+                  ansible.builtin.meta: end_play
+
+            - name: Finalizar recovery requireTLS no confirmado
+              ansible.builtin.fail:
+                msg: "Recovery requireTLS requiere confirm_recovery_cleanup=true para aplicar cleanup."
+              when: not (confirm_recovery_cleanup | default(false) | bool)
+
+        # RAMA A2: HOMOGENEOUS_PREFERTLS
+        - name: Recovery — Homogeneous preferTLS confirmado
+          when:
+            - mongo_tls_rec_rs_valid | bool
+            - mongo_tls_rec_specs_all_prefertls | bool
+            - mongo_tls_rec_runtime_all_prefertls | bool
+          block:
+            - name: Ejecutar cleanup de recovery preferTLS
+              when: confirm_recovery_cleanup | default(false) | bool
+              block:
+                - name: Limpiar control volumes en recovery preferTLS
+                  ansible.builtin.include_tasks: tasks/tls_control_volume_cleanup.yml
+                  vars:
+                    mongo_tls_force_cleanup: true
+
+                - name: Sincronizar vars/local.yml a preferTLS
+                  ansible.builtin.copy:
+                    dest: "{{ mongo_tls_local_vars_path }}"
+                    mode: "0644"
+                    content: >-
+                      {{
+                        lookup('ansible.builtin.file', mongo_tls_local_vars_path, rstrip=false)
+                        | regex_replace('(?m)^mongo_tls_enabled:.*$', 'mongo_tls_enabled: true')
+                        | regex_replace('(?m)^mongo_tls_clients_enabled:.*$', 'mongo_tls_clients_enabled: true')
+                        | regex_replace('(?m)^mongo_tls_target_mode:.*$', 'mongo_tls_target_mode: "requireTLS"')
+                        | regex_replace('(?m)^mongo_tls_deployment_mode:.*$', 'mongo_tls_deployment_mode: "preferTLS"')
+                      }}
+
+                - name: Marcar estado SUCCESS en recovery preferTLS
+                  ansible.builtin.set_fact:
+                    mongo_tls_current_phase: "SUCCESS"
+                    mongo_tls_needs_manual_recovery: false
+
+                - name: Persistir state file en recovery
+                  ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+                - name: Finalizar recovery exitoso preferTLS
+                  ansible.builtin.meta: end_play
+
+            - name: Finalizar recovery preferTLS no confirmado
+              ansible.builtin.fail:
+                msg: "Recovery preferTLS requiere confirm_recovery_cleanup=true para aplicar cleanup."
+              when: not (confirm_recovery_cleanup | default(false) | bool)
+
+        # RAMA A3: HOMOGENEOUS_ALLOWTLS
         - name: Recovery — Homogeneous allowTLS confirmado
           when:
             - mongo_tls_cluster_status.healthy | bool
@@ -269,12 +367,25 @@
         mongo_tls_service_current_version: {}
         mongo_tls_node_spec_status: {}
 
-    - name: Validar transicion de modo permitida (disabled -> allowTLS)
+    - name: Definir mapa de transiciones forward TLS permitidas
+      ansible.builtin.set_fact:
+        allowed_forward_transitions:
+          disabled: "allowTLS"
+          allowTLS: "preferTLS"
+          preferTLS: "requireTLS"
+
+    - name: Validar transicion forward TLS permitida
       ansible.builtin.assert:
         that:
-          - mongo_tls_deployment_mode == 'disabled'
-          - mongo_tls_expected_mode == 'allowTLS'
-        fail_msg: "Transicion {{ mongo_tls_deployment_mode }} -> {{ mongo_tls_expected_mode }} no permitida en Etapa 3."
+          - mongo_tls_deployment_mode in allowed_forward_transitions
+          - mongo_tls_expected_mode in ['allowTLS', 'preferTLS', 'requireTLS']
+          - allowed_forward_transitions[mongo_tls_deployment_mode] == mongo_tls_expected_mode
+          - (mongo_tls_clients_enabled | bool) if (mongo_tls_expected_mode in ['preferTLS', 'requireTLS']) else true
+        fail_msg: >-
+          Transicion forward no permitida: {{ mongo_tls_deployment_mode }} -> {{ mongo_tls_expected_mode }}.
+          Transiciones permitidas: disabled -> allowTLS, allowTLS -> preferTLS (requiere clients_enabled=true), preferTLS -> requireTLS.
+        success_msg: >-
+          [OK] Transicion forward TLS permitida: {{ mongo_tls_deployment_mode }} -> {{ mongo_tls_expected_mode }}"
 
     - name: Validar disponibilidad de curl y Docker Engine API
       ansible.builtin.command:
@@ -396,13 +507,25 @@
         - name: Persistir estado antes de updates de servicios
           ansible.builtin.include_tasks: tasks/tls_state_file.yml
 
-        - name: Actualizar los 3 servicios a PERMANENT_ALLOWTLS_SPEC
+        - name: Definir target spec mode segun target_tls_mode
+          ansible.builtin.set_fact:
+            mongo_tls_active_target_spec_mode: >-
+              {{
+                'permanent_requiretls' if mongo_tls_target_mode_expected == 'requireTLS' else (
+                  'permanent_prefertls' if mongo_tls_target_mode_expected == 'preferTLS' else (
+                    'permanent_allowtls' if mongo_tls_target_mode_expected == 'allowTLS' else
+                    'permanent_disabled'
+                  )
+                )
+              }}
+
+        - name: Actualizar los 3 servicios al TARGET_SPEC_MODE
           ansible.builtin.include_tasks: tasks/tls_service_update_api.yml
           loop: "{{ mongo_tls_service_names }}"
           loop_control:
             loop_var: mongo_tls_target_node
           vars:
-            mongo_tls_target_spec_mode: "permanent_allowtls"
+            mongo_tls_target_spec_mode: "{{ mongo_tls_active_target_spec_mode }}"
             mongo_tls_force_update: true
             mongo_tls_expected_version_index: "{{ mongo_tls_snapshot_services[mongo_tls_target_node].identity.version_index_at_snapshot }}"
 
@@ -458,6 +581,8 @@
 
         - name: Ejecutar validacion integral de cluster, identidad y TLS
           ansible.builtin.include_tasks: "{{ playbook_dir }}/../validation/tasks/validate_mongodb_tls_tasks.yml"
+          vars:
+            mongo_tls_expected_mode: "{{ mongo_tls_target_mode_expected }}"
 
       rescue:
         - name: Registrar error de runtime transition y disparar rollback global
@@ -503,7 +628,7 @@
           vars:
             local_vars_content: "{{ lookup('ansible.builtin.file', mongo_tls_local_vars_path, rstrip=false) }}"
 
-        - name: Persistir allowTLS en vars/local.yml
+        - name: Persistir nuevo deployment_mode en vars/local.yml
           ansible.builtin.copy:
             dest: "{{ mongo_tls_local_vars_path }}"
             mode: "{{ mongo_tls_local_vars_stat.stat.mode }}"
@@ -511,9 +636,9 @@
               {{
                 lookup('ansible.builtin.file', mongo_tls_local_vars_path, rstrip=false)
                 | regex_replace('(?m)^mongo_tls_enabled:.*$', 'mongo_tls_enabled: true')
-                | regex_replace('(?m)^mongo_tls_clients_enabled:.*$', 'mongo_tls_clients_enabled: false')
+                | regex_replace('(?m)^mongo_tls_clients_enabled:.*$', 'mongo_tls_clients_enabled: true')
                 | regex_replace('(?m)^mongo_tls_target_mode:.*$', 'mongo_tls_target_mode: "requireTLS"')
-                | regex_replace('(?m)^mongo_tls_deployment_mode:.*$', 'mongo_tls_deployment_mode: "allowTLS"')
+                | regex_replace('(?m)^mongo_tls_deployment_mode:.*$', 'mongo_tls_deployment_mode: "' ~ mongo_tls_target_mode_expected ~ '"')
               }}
           register: mongo_tls_state_persisted
 

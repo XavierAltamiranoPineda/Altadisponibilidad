@@ -15,13 +15,20 @@ if [ ! -f "$VAULT_PASSWORD_FILE" ]; then
   exit 1
 fi
 
+TARGET_MODE="preferTLS"
+if [ $# -gt 0 ] && [[ "$1" != -* ]]; then
+  TARGET_MODE="$1"
+  shift
+fi
+
+case "$TARGET_MODE" in
+  disabled|allowTLS|preferTLS|requireTLS) ;;
+  *)
+    echo "[ERROR] target_tls_mode invalido: '$TARGET_MODE'. Valores permitidos: disabled, allowTLS, preferTLS, requireTLS" >&2
+    exit 1
+    ;;
+esac
+
 mkdir -p "${PROJECT_ROOT}/logs"
 
-# exec flock -n: el FD del lock pertenece al proceso ansible-playbook.
-# Cualquier terminacion (normal, error, SIGTERM, SIGINT) libera el lock en el kernel.
-exec flock -n "$LOCK_FILE" \
-  ansible-playbook \
-    "${PROJECT_ROOT}/playbooks/mongodb/tls_rollout.yml" \
-    --vault-password-file "$VAULT_PASSWORD_FILE" \
-    --extra-vars "target_tls_mode=allowTLS" \
-    "$@"
+exec flock -n "$LOCK_FILE"   ansible-playbook     "${PROJECT_ROOT}/playbooks/mongodb/tls_rollout.yml"     --vault-password-file "$VAULT_PASSWORD_FILE"     --extra-vars "target_tls_mode=${TARGET_MODE}"     "$@"

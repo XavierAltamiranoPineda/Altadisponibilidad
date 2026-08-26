@@ -87,7 +87,7 @@
 
       # ── VALIDACION FAIL-CLOSED DE ARGUMENTOS POSICIONALES ─────────────────────────
       case "$TLS_MODE" in
-        disabled|allowTLS) ;;
+        disabled|allowTLS|preferTLS|requireTLS) ;;
         *)
           echo "FAIL-CLOSED: TLS_MODE invalido: '$TLS_MODE'" >&2
           exit 1
@@ -109,8 +109,8 @@
       install -m 0400 -o "$RUNTIME_UID" -g "$RUNTIME_GID" /run/secrets/mongo_keyfile /etc/mongo-keyfile
       test -s /etc/mongo-keyfile || { echo "FAIL-CLOSED: keyfile vacio" >&2; exit 1; }
 
-      # ── SI allowTLS: validar y materializar secretos TLS ─────────────────────────
-      if [ "$TLS_MODE" = "allowTLS" ]; then
+      # ── SI TLS activo (allowTLS/preferTLS/requireTLS): validar y materializar secretos TLS
+      if [ "$TLS_MODE" = "allowTLS" ] || [ "$TLS_MODE" = "preferTLS" ] || [ "$TLS_MODE" = "requireTLS" ]; then
         test -r /run/secrets/mongo_tls_ca       || { echo "FAIL-CLOSED: mongo_tls_ca inaccesible" >&2; exit 1; }
         test -r /run/secrets/mongo_tls_node_pem || { echo "FAIL-CLOSED: mongo_tls_node_pem inaccesible" >&2; exit 1; }
         install -d -m 0700 -o "$RUNTIME_UID" -g "$RUNTIME_GID" /run/mongo-tls
@@ -156,13 +156,19 @@
         }
 
         if [ "$OP_MODE" = "forward" ]; then
-          [ "$TARGET" = "allowTLS" ] || { echo "FAIL-CLOSED: target incoherente con forward: '$TARGET'" >&2; exit 1; }
-          [ "$TLS_MODE" = "allowTLS" ] || { echo "FAIL-CLOSED: TLS_MODE incoherente con forward: '$TLS_MODE'" >&2; exit 1; }
+          case "$TARGET" in
+            allowTLS|preferTLS|requireTLS) ;;
+            *) echo "FAIL-CLOSED: target incoherente con forward: '$TARGET'" >&2; exit 1 ;;
+          esac
+          [ "$TLS_MODE" = "$TARGET" ] || { echo "FAIL-CLOSED: TLS_MODE incoherente con forward: '$TLS_MODE' vs '$TARGET'" >&2; exit 1; }
         fi
 
         if [ "$OP_MODE" = "rollback" ]; then
-          [ "$TARGET" = "disabled" ] || { echo "FAIL-CLOSED: target incoherente con rollback: '$TARGET'" >&2; exit 1; }
-          [ "$TLS_MODE" = "disabled" ] || { echo "FAIL-CLOSED: TLS_MODE incoherente con rollback: '$TLS_MODE'" >&2; exit 1; }
+          case "$TARGET" in
+            disabled|allowTLS|preferTLS) ;;
+            *) echo "FAIL-CLOSED: target incoherente con rollback: '$TARGET'" >&2; exit 1 ;;
+          esac
+          [ "$TLS_MODE" = "$TARGET" ] || { echo "FAIL-CLOSED: TLS_MODE incoherente con rollback: '$TLS_MODE' vs '$TARGET'" >&2; exit 1; }
         fi
 
         echo "MODE=GATE op_id=$OP_ID op_mode=$OP_MODE tls=$TLS_MODE node=$EXPECTED_NODE"
@@ -208,14 +214,14 @@
       fi
 
       # ── EJECUTAR MONGOD ───────────────────────────────────────────────────────────
-      if [ "$TLS_MODE" = "allowTLS" ]; then
+      if [ "$TLS_MODE" = "requireTLS" ] || [ "$TLS_MODE" = "preferTLS" ] || [ "$TLS_MODE" = "allowTLS" ]; then
         exec "$RUNTIME_ENTRYPOINT" mongod \
           --replSet {{ mongo_replica_set }} \
           --auth \
           --clusterAuthMode keyFile \
           --keyFile /etc/mongo-keyfile \
           --bind_ip_all \
-          --tlsMode allowTLS \
+          --tlsMode "$TLS_MODE" \
           --tlsCertificateKeyFile /run/mongo-tls/mongo.pem \
           --tlsCAFile /run/mongo-tls/mongo_ca.pem \
           --tlsAllowConnectionsWithoutCertificates \

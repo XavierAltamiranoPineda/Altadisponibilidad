@@ -12,7 +12,7 @@ environment_name: "local"
 mongo_tls_enabled: true
 mongo_tls_clients_enabled: true
 mongo_tls_target_mode: "requireTLS"
-mongo_tls_deployment_mode: "allowTLS"
+mongo_tls_deployment_mode: "preferTLS"
 
 mongo_tls_provisioning_source: "ansible_local_ca"
 mongo_tls_secret_version: "v1"
