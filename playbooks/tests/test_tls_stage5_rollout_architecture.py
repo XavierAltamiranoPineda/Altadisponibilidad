@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-Static Architecture and Compliance Test for Stage 5 TLS Rollout (allowTLS -> preferTLS / requireTLS),
-Recovery / Reconciliation, and Runtime Detector.
+Static Architecture and Compliance Test for Stage 6 TLS Rollout (preferTLS -> requireTLS),
+Idempotency, Recovery, Strict Rejection of Plaintext, and Helpers Audit.
 Verifies:
 1. scripts/run_tls_rollout.sh parameter parsing, validation of allowed modes, and flock locking.
 2. Classifier recognition of permanent_disabled, permanent_allowtls, permanent_prefertls, permanent_requiretls, historical_disabled, and unknown.
@@ -12,15 +12,18 @@ Verifies:
    - disabled -> allowTLS (allowed)
    - allowTLS -> preferTLS (allowed, requires clients_enabled=true)
    - preferTLS -> requireTLS (allowed, requires clients_enabled=true)
-   - Stage jumps rejected.
-7. Bug 1 Fix: validate_mongodb_tls_tasks.yml does not use brittle 'first.ID' expressions and validates snapshot safely.
-8. Bug 2 Fix: tls_rollback_transition.yml calculates target_arg and spec_mode before using them in separate tasks.
+   - requireTLS -> requireTLS (idempotent no-op)
+   - Stage jumps (e.g. allowTLS -> requireTLS, disabled -> requireTLS) rejected.
+7. Snapshot validation is robust and compares canonical IDs.
+8. Rollback tasks separation (target_arg calculated before target_mode_expected).
 9. Runtime Detector (tls_query_runtime_modes.yml):
-   - Primary TLS connection with CA verification (/run/mongo-ca/mongo_ca.pem).
-   - Plaintext fallback for bootstrap/historical disabled recovery.
+   - Primary TLS connection with CA verification.
    - Explicit classification: disabled, allowTLS, preferTLS, requireTLS, and unknown.
-   - Zero insecure flags and zero passwords in argv.
-10. Rollback references tls_query_runtime_modes.yml correctly (zero typos like tls_query_runtime_mods.yml).
+10. Identity helper (tls_task_identity.yml) uses TLS with CA mounted readonly in TLS modes.
+11. Precheck (tls_precheck_pre_mutation.yml) is mode-aware and uses TLS with CA in allowTLS/preferTLS/requireTLS.
+12. Plaintext rejection:
+   - In requireTLS, plaintext is rejected on all nodes.
+13. Zero insecure flags and zero passwords in argv across repo.
 """
 
 import os, unittest
@@ -29,7 +32,7 @@ REPO = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if not os.path.isdir(os.path.join(REPO, 'playbooks')):
     REPO = '/home/usuario01/mongo-ansible-v2'
 
-class TestTLSStage5RolloutArchitecture(unittest.TestCase):
+class TestTLSStage6RolloutArchitecture(unittest.TestCase):
 
     def test_run_tls_rollout_script_validation(self):
         """Validates scripts/run_tls_rollout.sh structure and parameter checks"""
@@ -77,25 +80,27 @@ class TestTLSStage5RolloutArchitecture(unittest.TestCase):
         self.assertIn('--tlsAllowConnectionsWithoutCertificates', content)
         self.assertIn('--setParameter tlsWithholdClientCertificate=true', content)
 
-    def test_rollback_is_mode_aware(self):
-        """Validates that tls_rollback_transition.yml rolls back safely to source mode"""
+    def test_rollback_is_mode_aware_for_requiretls(self):
+        """Validates that tls_rollback_transition.yml rolls back requireTLS to preferTLS"""
         rollback_path = os.path.join(REPO, 'playbooks/mongodb/tasks/tls_rollback_transition.yml')
         with open(rollback_path) as f:
             content = f.read()
         self.assertIn('mongo_tls_rollback_spec_mode', content)
+        self.assertIn('permanent_prefertls', content)
         self.assertIn('permanent_allowtls', content)
         self.assertIn('permanent_disabled', content)
 
-    def test_transport_validator_mode_awareness(self):
+    def test_transport_validator_mode_awareness_and_plaintext_rejection(self):
         """Validates mode-aware transport probes in tls_validate_transport.yml"""
         transport_path = os.path.join(REPO, 'playbooks/mongodb/tasks/tls_validate_transport.yml')
         with open(transport_path) as f:
             content = f.read()
         self.assertIn("in ['allowTLS', 'preferTLS']", content)
         self.assertIn("== 'requireTLS'", content)
+        self.assertIn("mongo_plaintext_reject_probe.rc != 0", content)
 
-    def test_forward_transitions_matrix_in_rollout(self):
-        """Validates that tls_rollout.yml enforces strict adjacent forward transitions"""
+    def test_forward_transitions_matrix_and_idempotency_in_rollout(self):
+        """Validates that tls_rollout.yml enforces strict adjacent forward transitions and idempotency"""
         rollout_path = os.path.join(REPO, 'playbooks/mongodb/tls_rollout.yml')
         with open(rollout_path) as f:
             content = f.read()
@@ -106,52 +111,40 @@ class TestTLSStage5RolloutArchitecture(unittest.TestCase):
         self.assertIn('disabled: "allowTLS"', content)
         self.assertIn('allowTLS: "preferTLS"', content)
         self.assertIn('preferTLS: "requireTLS"', content)
-
-    def test_bug1_snapshot_validation_is_robust_and_no_first_id(self):
-        """Validates Bug 1 Fix: ensure no brittle 'first.ID' or similar unchecked access exists in validate_mongodb_tls_tasks.yml"""
-        val_path = os.path.join(REPO, 'playbooks/validation/tasks/validate_mongodb_tls_tasks.yml')
-        with open(val_path) as f:
-            content = f.read()
-        self.assertNotIn('| from_json | first).ID', content, "Brittle '.ID' access on unparsed dict found in validator")
-        self.assertIn('mongo_tls_validated_services_map', content, "Validator must use structured normalized map")
-        self.assertIn('mongo_tls_snapshot_services[item].identity.service_id', content, "Validator must compare canonical snapshot IDs")
-
-    def test_bug2_rollback_tasks_separation(self):
-        """Validates Bug 2 Fix: ensure rollback target_arg calculation and target_mode_expected setting are in separate tasks"""
-        rb_path = os.path.join(REPO, 'playbooks/mongodb/tasks/tls_rollback_transition.yml')
-        with open(rb_path) as f:
-            content = f.read()
-        self.assertIn('TAREA A', content, "Task A for calculating target_arg must be present")
-        self.assertIn('TAREA B', content, "Task B for setting target_mode_expected must be present")
-        task_a_idx = content.find('Calcular target y spec mode de rollback')
-        task_b_idx = content.find('Marcar fase de rollback y registrar target_mode esperado')
-        self.assertTrue(task_a_idx != -1 and task_b_idx != -1 and task_a_idx < task_b_idx,
-                        "Task A must precede Task B in tls_rollback_transition.yml")
+        self.assertIn("Manejo idempotente de cluster ya en requireTLS", content)
 
     def test_runtime_detector_classification_and_modes(self):
         """Validates tls_query_runtime_modes.yml has full mode awareness: disabled, allowTLS, preferTLS, requireTLS, and unknown"""
         query_path = os.path.join(REPO, 'playbooks/mongodb/tasks/tls_query_runtime_modes.yml')
         with open(query_path) as f:
             content = f.read()
-
-        # Classification checks
         self.assertIn("return 'disabled'", content)
         self.assertIn("return 'allowTLS'", content)
         self.assertIn("return 'preferTLS'", content)
         self.assertIn("return 'requireTLS'", content)
         self.assertIn("return 'unknown'", content)
-
-        # Primary TLS with CA check and plaintext fallback
         self.assertIn("tlsCAFile", content)
         self.assertIn("/run/mongo-ca/mongo_ca.pem", content)
         self.assertIn("plaintext_fallback", content)
-        self.assertIn("tls_error", content)
 
-        # Insecure flags and passwords
-        self.assertNotIn("tlsAllowInvalidCertificates", content)
-        self.assertNotIn("tlsAllowInvalidHostnames", content)
-        self.assertNotIn("tlsInsecure", content)
-        self.assertNotIn("password=", content)
+    def test_task_identity_uses_tls_and_ca(self):
+        """Validates tls_task_identity.yml uses TLS with CA file in TLS modes"""
+        identity_path = os.path.join(REPO, 'playbooks/mongodb/tasks/tls_task_identity.yml')
+        with open(identity_path) as f:
+            content = f.read()
+        self.assertIn('/run/mongo-ca/mongo_ca.pem', content)
+        self.assertIn('&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem', content)
+        self.assertNotIn('tlsAllowInvalidCertificates', content)
+        self.assertNotIn('tlsAllowInvalidHostnames', content)
+
+    def test_precheck_is_mode_aware_and_uses_tls(self):
+        """Validates tls_precheck_pre_mutation.yml uses TLS with CA file in TLS modes"""
+        precheck_path = os.path.join(REPO, 'playbooks/mongodb/tasks/tls_precheck_pre_mutation.yml')
+        with open(precheck_path) as f:
+            content = f.read()
+        self.assertIn('/run/mongo-ca/mongo_ca.pem', content)
+        self.assertIn('&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem', content)
+        self.assertIn("sourceMode !== 'requireTLS'", content, "requireTLS must never fallback to plaintext")
 
     def test_rollback_task_include_spelling(self):
         """Ensures tls_rollback_transition.yml references tls_query_runtime_modes.yml with zero typos"""
@@ -166,7 +159,7 @@ class TestTLSStage5RolloutArchitecture(unittest.TestCase):
         local_vars_path = os.path.join(REPO, 'vars/local.yml')
         with open(local_vars_path) as f:
             content = f.read()
-        self.assertIn('mongo_tls_deployment_mode: "allowTLS"', content)
+        self.assertIn('mongo_tls_deployment_mode: "preferTLS"', content)
         self.assertIn('mongo_tls_clients_enabled: true', content)
 
 

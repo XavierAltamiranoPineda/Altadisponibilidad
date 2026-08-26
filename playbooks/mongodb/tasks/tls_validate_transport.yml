@@ -43,7 +43,7 @@
   retries: 10
   delay: 3
   until: mongo_plaintext_probe.rc == 0 and 'PLAINTEXT_OK' in mongo_plaintext_probe.stdout
-  when: mongo_tls_deployment_mode | default('allowTLS') in ['allowTLS', 'preferTLS']
+  when: (mongo_tls_expected_mode | default(mongo_tls_deployment_mode | default('allowTLS'))) in ['allowTLS', 'preferTLS']
 
 - name: Probar rechazo de plaintext en {{ mongo_tls_validation_node }} (requireTLS)
   ansible.builtin.command:
@@ -62,7 +62,7 @@
   register: mongo_plaintext_reject_probe
   changed_when: false
   failed_when: false
-  when: mongo_tls_deployment_mode | default('allowTLS') == 'requireTLS'
+  when: (mongo_tls_expected_mode | default(mongo_tls_deployment_mode | default('allowTLS'))) == 'requireTLS'
 
 - name: Validar rechazo efectivo de plaintext en {{ mongo_tls_validation_node }}
   ansible.builtin.assert:
@@ -70,4 +70,4 @@
       - mongo_plaintext_reject_probe.rc != 0
     fail_msg: "Plaintext fue aceptado en {{ mongo_tls_validation_node }} a pesar de estar en requireTLS."
     success_msg: "OK: Plaintext rechazado en {{ mongo_tls_validation_node }} bajo requireTLS."
-  when: mongo_tls_deployment_mode | default('allowTLS') == 'requireTLS'
+  when: (mongo_tls_expected_mode | default(mongo_tls_deployment_mode | default('allowTLS'))) == 'requireTLS'

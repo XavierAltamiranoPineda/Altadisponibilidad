@@ -367,6 +367,24 @@
         mongo_tls_service_current_version: {}
         mongo_tls_node_spec_status: {}
 
+        # ── VALIDACION DE IDEMPOTENCIA (NO-OP SI YA ESTA EN TARGET) ─────────────
+    - name: Manejo idempotente de cluster ya en requireTLS
+      when:
+        - mongo_tls_deployment_mode == 'requireTLS'
+        - mongo_tls_expected_mode == 'requireTLS'
+      block:
+        - name: Validar cluster ya convergido en requireTLS
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/../validation/tasks/validate_mongodb_tls_tasks.yml"
+          vars:
+            mongo_tls_expected_mode: "requireTLS"
+
+        - name: Notificar convergencia idempotente en requireTLS
+          ansible.builtin.debug:
+            msg: "[OK] El cluster ya se encuentra en requireTLS y validado. Operacion idempotente sin mutaciones."
+
+        - name: Finalizar ejecucion idempotente sin cambios
+          ansible.builtin.meta: end_play
+
     - name: Definir mapa de transiciones forward TLS permitidas
       ansible.builtin.set_fact:
         allowed_forward_transitions:

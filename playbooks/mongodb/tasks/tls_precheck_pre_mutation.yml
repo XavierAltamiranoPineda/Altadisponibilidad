@@ -78,6 +78,8 @@
       - --rm
       - --network
       - "{{ mongo_network }}"
+      - --mount
+      - "type=bind,src={{ mongo_tls_ca_cert_path }},dst=/run/mongo-ca/mongo_ca.pem,readonly"
       - --env
       - MONGO_ADMIN_USER
       - --env
@@ -90,15 +92,31 @@
       - |
           const user = process.env.MONGO_ADMIN_USER;
           const pass = process.env.MONGO_ADMIN_PASSWORD;
-          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@{{ item }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=5000`;
-          try {
-            const db = connect(uri);
-            const opts = db.adminCommand({getCmdLineOpts: 1}).parsed;
-            const tlsMode = (opts.net && opts.net.tls && opts.net.tls.mode) ? opts.net.tls.mode : 'disabled';
-            print('PMC_RUNTIME_JSON=' + JSON.stringify({ node: '{{ item }}', tlsMode: tlsMode }));
-          } catch(e) {
-            print('PMC_RUNTIME_JSON=' + JSON.stringify({ node: '{{ item }}', tlsMode: 'query_failed' }));
+          const sourceMode = '{{ mongo_tls_source_mode_initial | default(mongo_tls_deployment_mode | default("allowTLS")) }}';
+          const caFile = '/run/mongo-ca/mongo_ca.pem';
+          let tlsMode = 'query_failed';
+
+          // 1. Intento primario TLS con CA
+          if (['allowTLS', 'preferTLS', 'requireTLS'].includes(sourceMode)) {
+            try {
+              const tlsUri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@{{ item }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=4000&tls=true&tlsCAFile=${caFile}`;
+              const db = connect(tlsUri);
+              const opts = db.adminCommand({getCmdLineOpts: 1}).parsed;
+              tlsMode = (opts.net && opts.net.tls && opts.net.tls.mode) ? opts.net.tls.mode : 'disabled';
+            } catch(e) {}
           }
+
+          // 2. Fallback plaintext si sourceMode es disabled o fallo TLS en allowTLS/preferTLS
+          if (tlsMode === 'query_failed' && sourceMode !== 'requireTLS') {
+            try {
+              const plainUri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@{{ item }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=4000`;
+              const db = connect(plainUri);
+              const opts = db.adminCommand({getCmdLineOpts: 1}).parsed;
+              tlsMode = (opts.net && opts.net.tls && opts.net.tls.mode) ? opts.net.tls.mode : 'disabled';
+            } catch(e) {}
+          }
+
+          print('PMC_RUNTIME_JSON=' + JSON.stringify({ node: '{{ item }}', tlsMode: tlsMode }));
   environment:
     MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
     MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
@@ -131,6 +149,8 @@
       - --rm
       - --network
       - "{{ mongo_network }}"
+      - --mount
+      - "type=bind,src={{ mongo_tls_ca_cert_path }},dst=/run/mongo-ca/mongo_ca.pem,readonly"
       - --env
       - MONGO_ADMIN_USER
       - --env
@@ -143,7 +163,12 @@
       - |
           const user = process.env.MONGO_ADMIN_USER;
           const pass = process.env.MONGO_ADMIN_PASSWORD;
-          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&serverSelectionTimeoutMS=5000`;
+          const sourceMode = '{{ mongo_tls_source_mode_initial | default(mongo_tls_deployment_mode | default("allowTLS")) }}';
+          const tlsPart =
+            ['allowTLS', 'preferTLS', 'requireTLS'].includes(sourceMode)
+              ? '&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem'
+              : '';
+          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&serverSelectionTimeoutMS=5000${tlsPart}`;
           try {
             const db = connect(uri);
             const st = db.adminCommand({replSetGetStatus: 1});

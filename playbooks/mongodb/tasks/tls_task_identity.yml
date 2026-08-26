@@ -11,6 +11,8 @@
       - --rm
       - --network
       - "{{ mongo_network }}"
+      - --mount
+      - "type=bind,src={{ mongo_tls_ca_cert_path }},dst=/run/mongo-ca/mongo_ca.pem,readonly"
       - --env
       - MONGO_ADMIN_USER
       - --env
@@ -23,7 +25,12 @@
       - |
           const user = process.env.MONGO_ADMIN_USER;
           const pass = process.env.MONGO_ADMIN_PASSWORD;
-          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@{{ mongo_tls_identity_node }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=10000`;
+          const expectedMode = '{{ mongo_tls_expected_mode | default(mongo_tls_deployment_mode | default("allowTLS")) }}';
+          const tlsPart =
+            ['allowTLS', 'preferTLS', 'requireTLS'].includes(expectedMode)
+              ? '&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem'
+              : '';
+          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@{{ mongo_tls_identity_node }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=10000${tlsPart}`;
           const db = connect(uri);
           const st = db.adminCommand({replSetGetStatus: 1});
           const selfMember = st.members.find(m => m.self);

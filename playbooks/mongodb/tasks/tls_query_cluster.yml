@@ -11,6 +11,8 @@
       - --rm
       - --network
       - "{{ mongo_network }}"
+      - --mount
+      - "type=bind,src={{ mongo_tls_ca_cert_path }},dst=/run/mongo-ca/mongo_ca.pem,readonly"
       - --env
       - MONGO_ADMIN_USER
       - --env
@@ -29,14 +31,27 @@
           const expected = ['mongo1:27017', 'mongo2:27017', 'mongo3:27017'];
           const requiredNode = '{{ mongo_tls_cluster_expected_node | default('') }}';
           const requiredState = '{{ mongo_tls_cluster_expected_state | default('') }}';
-          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet=${replSet}&serverSelectionTimeoutMS=5000`;
-          
+          const expectedMode = '{{ mongo_tls_expected_mode | default(mongo_tls_deployment_mode | default("allowTLS")) }}';
+
+          const tlsPart =
+            ['allowTLS', 'preferTLS', 'requireTLS'].includes(expectedMode)
+              ? '&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem'
+              : '';
+
+          const uri =
+            `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}` +
+            `@mongo1:27017,mongo2:27017,mongo3:27017/admin` +
+            `?replicaSet=${replSet}` +
+            `&serverSelectionTimeoutMS=5000` +
+            tlsPart;
+
           let result;
-          for (let attempt = 0; attempt < {{ mongo_tls_cluster_retries | default(120) }}; attempt++) {
+          for (let attempt = 0; attempt < {{ mongo_tls_cluster_retries | default(20) }}; attempt++) {
             try {
               const db = connect(uri);
               const status = db.adminCommand({replSetGetStatus: 1});
               const config = db.adminCommand({replSetGetConfig: 1}).config;
+
               const members = status.members.map(m => ({
                 name: m.name,
                 service: m.name.split(':')[0],
@@ -44,18 +59,29 @@
                 stateStr: m.stateStr,
                 health: m.health
               }));
-              const healthy = status.set === replSet &&
+
+              const healthy =
+                status.set === replSet &&
                 members.length === 3 &&
                 members.filter(m => m.stateStr === 'PRIMARY' && m.health === 1).length === 1 &&
                 members.filter(m => m.stateStr === 'SECONDARY' && m.health === 1).length === 2 &&
                 members.every(m => expected.includes(m.name));
-              const requiredHealthy = !requiredNode || members.some(m =>
-                m.service === requiredNode && m.stateStr === requiredState && m.health === 1);
+
+              const requiredHealthy =
+                !requiredNode ||
+                members.some(m =>
+                  m.service === requiredNode &&
+                  m.stateStr === requiredState &&
+                  m.health === 1
+                );
+
               result = {
                 set: status.set,
                 members,
                 primary: (members.find(m => m.stateStr === 'PRIMARY') || {}).service,
-                secondaries: members.filter(m => m.stateStr === 'SECONDARY').map(m => m.service),
+                secondaries: members
+                  .filter(m => m.stateStr === 'SECONDARY')
+                  .map(m => m.service),
                 config: {
                   _id: config._id,
                   version: config.version,
@@ -67,12 +93,19 @@
                 healthy,
                 requiredHealthy
               };
+
               if (healthy && requiredHealthy) break;
             } catch (err) {
-              result = { healthy: false, requiredHealthy: false, error: err.message };
+              result = {
+                healthy: false,
+                requiredHealthy: false,
+                error: err.message
+              };
             }
-            sleep({{ (mongo_tls_cluster_delay | default(3) | int) * 1000 }});
+
+            sleep({{ (mongo_tls_cluster_delay | default(2) | int) * 1000 }});
           }
+
           print('TLS_CLUSTER_JSON=' + JSON.stringify(result));
   environment:
     MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
