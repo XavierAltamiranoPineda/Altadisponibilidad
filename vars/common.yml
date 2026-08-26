@@ -111,3 +111,10 @@ mongodb_tools_version_policy: "supported_for_platform"
 mongodb_tools_root: "{{ playbook_dir }}/../../tools/mongodb-database-tools"
 mongodb_tools_platform: "ubuntu2604"
 mongodb_tools_arch: "x86_64"
+
+# ============================================================
+# NOTIFICACIONES DE FALLO DE RESPALDO
+# ============================================================
+
+backup_alert_log_filename: "mongodb_backup_alert.log"
+backup_notification_command: ""

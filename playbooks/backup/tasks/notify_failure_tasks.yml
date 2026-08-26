@@ -1,0 +1,62 @@
+---
+- name: Resolver ruta del proyecto para notificador
+  ansible.builtin.command:
+    cmd: "realpath {{ playbook_dir }}/../.."
+  register: notify_project_root
+  changed_when: false
+  ignore_errors: true
+
+- name: Sanitizar motivo del fallo para notificacion
+  ansible.builtin.set_fact:
+    sanitized_failure_reason: >-
+      {{
+        (backup_failure_reason
+         | default(ansible_failed_result.msg | default('Unknown failure during backup'))
+         | string
+         | regex_replace(mongo_backup_password | default('') | regex_escape, '[REDACTED]')
+         | regex_replace(mongo_admin_password | default('') | regex_escape, '[REDACTED]')
+         | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
+         | regex_replace('[
+	|]', ' ')
+         | trim)
+      }}
+  no_log: true
+
+- name: Registrar estado FAILED en la bitacora de auditoria
+  ansible.builtin.lineinfile:
+    path: "{{ (notify_project_root.stdout | default('.')) ~ '/logs/' ~ (backup_log_filename | default('mongodb_backup.log')) }}"
+    create: true
+    mode: "0600"
+    insertafter: EOF
+    line: >-
+      {{ backup_timestamp | default(ansible_date_time.iso8601_basic_short | default('UNKNOWN')) }}
+      | environment={{ environment_name | default('local') }}
+      | database={{ mongo_database | default('unknown') }}
+      | result=FAILED
+      | reason={{ sanitized_failure_reason }}
+  ignore_errors: true
+
+- name: Ejecutar script institucional de notificacion de fallo
+  ansible.builtin.command:
+    argv: >-
+      {{
+        [
+          (notify_project_root.stdout | default('.')) ~ '/scripts/notify_backup_failure.sh',
+          '--environment', environment_name | default('local'),
+          '--database', mongo_database | default('unknown'),
+          '--timestamp', backup_timestamp | default('UNKNOWN'),
+          '--reason', sanitized_failure_reason
+        ]
+        +
+        (['--custom-command', backup_notification_command]
+         if (backup_notification_command is defined and backup_notification_command | length > 0) else [])
+      }}
+  register: notify_script_result
+  changed_when: false
+  failed_when: false
+  no_log: true
+
+- name: Advertir si el notifier reporto error sin ocultar fallo original
+  ansible.builtin.debug:
+    msg: "[WARN] El notifier fallo con codigo {{ notify_script_result.rc }}: {{ notify_script_result.stderr | default('') }}"
+  when: notify_script_result is defined and notify_script_result.rc != 0

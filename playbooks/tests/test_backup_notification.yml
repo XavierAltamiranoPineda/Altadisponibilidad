@@ -1,0 +1,153 @@
+---
+# ============================================================
+# Playbook: Prueba Controlada de Notificacion de Fallos de Backup
+#
+# Proposito:
+#   Valida de forma controlada y segura la generacion de alertas
+#   y registros de auditoria ante fallos de backup sin provocar
+#   un fallo destructivo en el cluster real, preservando la
+#   evidencia generada en logs/mongodb_backup_alert.log.
+# ============================================================
+
+- name: Validar sistema de notificacion y alertas de backup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    project_root: "{{ playbook_dir }}/../.."
+    simulated_reason: "Simulated mongodump connection timeout during test drill"
+
+  tasks:
+
+    # ============================================================
+    # 1. RESOLUCION DE RUTAS Y VERIFICACION DEL SCRIPT
+    # ============================================================
+
+    - name: Obtener ruta canonica del proyecto
+      ansible.builtin.command:
+        cmd: "realpath {{ project_root }}"
+      register: canonical_project_root
+      changed_when: false
+
+    - name: Definir rutas del notificador y logs
+      ansible.builtin.set_fact:
+        resolved_notifier_script: "{{ canonical_project_root.stdout }}/scripts/notify_backup_failure.sh"
+        resolved_alert_log: "{{ canonical_project_root.stdout }}/logs/{{ backup_alert_log_filename }}"
+
+    - name: Validar existencia del script notificador
+      ansible.builtin.stat:
+        path: "{{ resolved_notifier_script }}"
+      register: notifier_stat
+
+    - name: Confirmar que el script notificador es ejecutable
+      ansible.builtin.assert:
+        that:
+          - notifier_stat.stat.exists
+          - notifier_stat.stat.isreg
+          - notifier_stat.stat.executable
+        fail_msg: "[ERROR] El script de notificacion no existe o no es ejecutable"
+        success_msg: "[OK] Script notify_backup_failure.sh disponible y ejecutable"
+
+    # ============================================================
+    # 2. GENERACION DE TIMESTAMP DE PRUEBA
+    # ============================================================
+
+    - name: Generar timestamp unico para la simulacion
+      ansible.builtin.command: date +%Y%m%d_%H%M%S_test
+      register: sim_timestamp_raw
+      changed_when: false
+
+    - name: Registrar timestamp de prueba
+      ansible.builtin.set_fact:
+        sim_timestamp: "{{ sim_timestamp_raw.stdout | trim }}"
+
+    # ============================================================
+    # 3. EJECUCION CONTROLADA DEL NOTIFICADOR Y VALIDACION
+    # ============================================================
+
+    - name: Ejecutar script notificador con datos simulados
+      ansible.builtin.command:
+        argv:
+          - "{{ resolved_notifier_script }}"
+          - --environment
+          - "{{ environment_name }}"
+          - --database
+          - "{{ mongo_database }}"
+          - --timestamp
+          - "{{ sim_timestamp }}"
+          - --reason
+          - "{{ simulated_reason }}"
+      register: notification_exec
+      changed_when: true
+
+    - name: Validar codigo de retorno del notificador
+      ansible.builtin.assert:
+        that:
+          - notification_exec.rc == 0
+        fail_msg: "[ERROR] El notificador termino con codigo de error"
+        success_msg: "[OK] Notificador ejecutado correctamente (rc=0)"
+
+    - name: Verificar creacion y permisos del archivo de alerta
+      ansible.builtin.stat:
+        path: "{{ resolved_alert_log }}"
+      register: alert_log_stat
+
+    - name: Validar permisos 0600 del archivo de alertas
+      ansible.builtin.assert:
+        that:
+          - alert_log_stat.stat.exists
+          - alert_log_stat.stat.isreg
+          - alert_log_stat.stat.mode in ['0600', '0400']
+        fail_msg: "[ERROR] El archivo de alertas no tiene permisos seguros (esperado 0600)"
+        success_msg: "[OK] Archivo de alertas validado con permisos seguros ({{ alert_log_stat.stat.mode }})"
+
+    - name: Leer contenido de la bitacora de alertas
+      ansible.builtin.slurp:
+        src: "{{ resolved_alert_log }}"
+      register: alert_log_raw
+
+    - name: Decodificar bitacora de alertas
+      ansible.builtin.set_fact:
+        alert_log_content: "{{ alert_log_raw.content | b64decode }}"
+
+    - name: Validar estructura y campos obligatorios de la linea de alerta
+      ansible.builtin.assert:
+        that:
+          - sim_timestamp in alert_log_content
+          - "'severity=ERROR' in alert_log_content"
+          - "'environment=' ~ environment_name in alert_log_content"
+          - "'database=' ~ mongo_database in alert_log_content"
+          - "'reason=' ~ simulated_reason in alert_log_content"
+          - "'notification=GENERATED' in alert_log_content"
+        fail_msg: "[ERROR] La linea de alerta no contiene los campos requeridos"
+        success_msg: "[OK] Linea de alerta verificada con formato institucional"
+
+    - name: Validar ausencia total de secretos en el log de alertas
+      ansible.builtin.assert:
+        that:
+          - mongo_admin_password not in alert_log_content
+          - mongo_backup_password not in alert_log_content
+          - mongo_restore_password not in alert_log_content
+        fail_msg: "[ERROR] Se detectaron credenciales o secretos en el log de alertas!"
+        success_msg: "[OK] Ausencia total de secretos validada en el log de alertas"
+
+    - name: Mostrar resultado de la prueba de notificacion
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "PRUEBA DE NOTIFICACION DE FALLOS VALIDADA"
+          - "============================================================"
+          - "Ambiente: {{ environment_name }}"
+          - "Base: {{ mongo_database }}"
+          - "Timestamp simulado: {{ sim_timestamp }}"
+          - "Log de alertas: {{ resolved_alert_log }} (modo 0600)"
+          - "Notificacion generada: OK"
+          - "Sin secretos expuestos: OK"
+          - "Evidencia de alerta preservada: SI"
+          - "============================================================"

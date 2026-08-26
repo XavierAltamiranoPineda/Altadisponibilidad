@@ -21,149 +21,175 @@
         file: "{{ playbook_dir }}/../../vars/{{ target_environment }}.yml"
 
     # ============================================================
-    # VALIDACION DE CONFIGURACION
+    # BLOQUE PRINCIPAL DE VALIDACION CON NOTIFICACION
     # ============================================================
 
-    - name: Validar algoritmo de checksum configurado
-      ansible.builtin.assert:
-        that:
-          - backup_checksum_algorithm == "sha256"
-        fail_msg: >-
-          [ERROR] Algoritmo de checksum no soportado.
-          Esperado: sha256
-          Configurado: {{ backup_checksum_algorithm }}
-        success_msg: "[OK] Algoritmo de checksum validado: {{ backup_checksum_algorithm }}"
+    - name: Validacion de respaldo con captura de fallo y alerta
+      block:
 
-    # ============================================================
-    # BUSQUEDA Y VALIDACION DEL BACKUP
-    # ============================================================
+        # ============================================================
+        # VALIDACION DE CONFIGURACION
+        # ============================================================
 
-    - name: Buscar respaldo mas reciente
-      ansible.builtin.shell: |
-        find "{{ backup_root }}/{{ mongo_database }}" \
-          -type f \
-          -name "{{ mongo_database }}_*{{ backup_extension }}" \
-          -printf '%T@ %p\n' \
-          | sort -nr \
-          | head -n1 \
-          | cut -d' ' -f2-
-      register: latest_backup
-      changed_when: false
+        - name: Validar algoritmo de checksum configurado
+          ansible.builtin.assert:
+            that:
+              - backup_checksum_algorithm == "sha256"
+            fail_msg: >-
+              [ERROR] Algoritmo de checksum no soportado.
+              Esperado: sha256
+              Configurado: {{ backup_checksum_algorithm }}
+            success_msg: "[OK] Algoritmo de checksum validado: {{ backup_checksum_algorithm }}"
 
-    - name: Validar que exista al menos un respaldo
-      ansible.builtin.assert:
-        that:
-          - latest_backup.stdout | length > 0
-        fail_msg: "[ERROR] No se encontro ningun respaldo para {{ mongo_database }}"
-        success_msg: "[OK] Respaldo encontrado"
+        # ============================================================
+        # BUSQUEDA Y VALIDACION DEL BACKUP
+        # ============================================================
 
-    - name: Definir archivo de respaldo
-      ansible.builtin.set_fact:
-        backup_file_path: "{{ latest_backup.stdout }}"
-        checksum_file_path: "{{ latest_backup.stdout }}.sha256"
+        - name: Buscar respaldo mas reciente
+          ansible.builtin.shell: |
+            find "{{ backup_root }}/{{ mongo_database }}" \
+              -type f \
+              -name "{{ mongo_database }}_*{{ backup_extension }}" \
+              -printf '%T@ %p\n' \
+              | sort -nr \
+              | head -n1 \
+              | cut -d' ' -f2-
+          register: latest_backup
+          changed_when: false
 
-    - name: Obtener informacion del respaldo
-      ansible.builtin.stat:
-        path: "{{ backup_file_path }}"
-      register: backup_file_stat
+        - name: Validar que exista al menos un respaldo
+          ansible.builtin.assert:
+            that:
+              - latest_backup.stdout | length > 0
+            fail_msg: "[ERROR] No se encontro ningun respaldo para {{ mongo_database }}"
+            success_msg: "[OK] Respaldo encontrado"
 
-    - name: Obtener informacion del checksum
-      ansible.builtin.stat:
-        path: "{{ checksum_file_path }}"
-      register: checksum_file_stat
+        - name: Definir archivo de respaldo
+          ansible.builtin.set_fact:
+            backup_file_path: "{{ latest_backup.stdout }}"
+            checksum_file_path: "{{ latest_backup.stdout }}.sha256"
 
-    - name: Validar existencia y tamaño del respaldo
-      ansible.builtin.assert:
-        that:
-          - backup_file_stat.stat.exists
-          - backup_file_stat.stat.isreg
-          - backup_file_stat.stat.size | int > 0
-        fail_msg: "[ERROR] El archivo de respaldo no es valido"
-        success_msg: "[OK] Archivo de respaldo existente y no vacio"
+        - name: Obtener informacion del respaldo
+          ansible.builtin.stat:
+            path: "{{ backup_file_path }}"
+          register: backup_file_stat
 
-    - name: Validar existencia del archivo SHA-256
-      ansible.builtin.assert:
-        that:
-          - checksum_file_stat.stat.exists
-          - checksum_file_stat.stat.isreg
-          - checksum_file_stat.stat.size | int > 0
-        fail_msg: "[ERROR] No existe el archivo SHA-256 asociado"
-        success_msg: "[OK] Archivo SHA-256 encontrado"
+        - name: Obtener informacion del checksum
+          ansible.builtin.stat:
+            path: "{{ checksum_file_path }}"
+          register: checksum_file_stat
 
-    - name: Validar checksum SHA-256
-      ansible.builtin.shell: |
-        cd "$(dirname "{{ backup_file_path }}")"
-        sha256sum -c "$(basename "{{ checksum_file_path }}")"
-      register: checksum_validation
-      changed_when: false
+        - name: Validar existencia y tamaño del respaldo
+          ansible.builtin.assert:
+            that:
+              - backup_file_stat.stat.exists
+              - backup_file_stat.stat.isreg
+              - backup_file_stat.stat.size | int > 0
+            fail_msg: "[ERROR] El archivo de respaldo no es valido"
+            success_msg: "[OK] Archivo de respaldo existente y no vacio"
 
-    - name: Confirmar checksum
-      ansible.builtin.assert:
-        that:
-          - checksum_validation.rc == 0
-        fail_msg: "[ERROR] El checksum SHA-256 no coincide"
-        success_msg: "[OK] Integridad SHA-256 validada"
+        - name: Validar existencia del archivo SHA-256
+          ansible.builtin.assert:
+            that:
+              - checksum_file_stat.stat.exists
+              - checksum_file_stat.stat.isreg
+              - checksum_file_stat.stat.size | int > 0
+            fail_msg: "[ERROR] No existe el archivo SHA-256 asociado"
+            success_msg: "[OK] Archivo SHA-256 encontrado"
 
-    - name: Validar convencion de nombre institucional
-      ansible.builtin.assert:
-        that:
-          - >
-            backup_file_path | basename
-            is match('^' ~ mongo_database ~ '_[0-9]{8}_[0-9]{6}' ~ (backup_extension | regex_escape) ~ '$')
-        fail_msg: "[ERROR] El nombre del respaldo no cumple la convencion institucional"
-        success_msg: "[OK] Convencion de nombre validada"
+        - name: Validar checksum SHA-256
+          ansible.builtin.shell: |
+            cd "$(dirname "{{ backup_file_path }}")"
+            sha256sum -c "$(basename "{{ checksum_file_path }}")"
+          register: checksum_validation
+          changed_when: false
 
-    # ============================================================
-    # VALIDACION DE MONGODB DATABASE TOOLS
-    # ============================================================
+        - name: Confirmar checksum
+          ansible.builtin.assert:
+            that:
+              - checksum_validation.rc == 0
+            fail_msg: "[ERROR] El checksum SHA-256 no coincide"
+            success_msg: "[OK] Integridad SHA-256 validada"
 
-    - name: Verificar disponibilidad de mongodump en el host
-      ansible.builtin.command:
-        cmd: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongodump --version"
-      register: mongodump_version
-      changed_when: false
+        - name: Validar convencion de nombre institucional
+          ansible.builtin.assert:
+            that:
+              - >
+                backup_file_path | basename
+                is match('^' ~ mongo_database ~ '_[0-9]{8}_[0-9]{6}' ~ (backup_extension | regex_escape) ~ '$')
+            fail_msg: "[ERROR] El nombre del respaldo no cumple la convencion institucional"
+            success_msg: "[OK] Convencion de nombre validada"
 
-    - name: Verificar disponibilidad de mongorestore en el host
-      ansible.builtin.command:
-        cmd: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongorestore --version"
-      register: mongorestore_version
-      changed_when: false
+        # ============================================================
+        # VALIDACION DE MONGODB DATABASE TOOLS
+        # ============================================================
 
-    - name: Validar version aprobada de mongodump
-      ansible.builtin.assert:
-        that:
-          - "'mongodump version: ' ~ mongodb_tools_version in mongodump_version.stdout"
-        fail_msg: >-
-          [ERROR] Version incorrecta de mongodump.
-          Esperada: {{ mongodb_tools_version }}
-        success_msg: "[OK] mongodump {{ mongodb_tools_version }} validado"
+        - name: Verificar disponibilidad de mongodump en el host
+          ansible.builtin.command:
+            cmd: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongodump --version"
+          register: mongodump_version
+          changed_when: false
 
-    - name: Validar version aprobada de mongorestore
-      ansible.builtin.assert:
-        that:
-          - "'mongorestore version: ' ~ mongodb_tools_version in mongorestore_version.stdout"
-        fail_msg: >-
-          [ERROR] Version incorrecta de mongorestore.
-          Esperada: {{ mongodb_tools_version }}
-        success_msg: "[OK] mongorestore {{ mongodb_tools_version }} validado"
+        - name: Verificar disponibilidad de mongorestore en el host
+          ansible.builtin.command:
+            cmd: "{{ mongodb_tools_root }}/{{ mongodb_tools_version }}/bin/mongorestore --version"
+          register: mongorestore_version
+          changed_when: false
 
-    # ============================================================
-    # RESULTADO
-    # ============================================================
+        - name: Validar version aprobada de mongodump
+          ansible.builtin.assert:
+            that:
+              - "'mongodump version: ' ~ mongodb_tools_version in mongodump_version.stdout"
+            fail_msg: >-
+              [ERROR] Version incorrecta de mongodump.
+              Esperada: {{ mongodb_tools_version }}
+            success_msg: "[OK] mongodump {{ mongodb_tools_version }} validado"
 
-    - name: Mostrar resultado final
-      ansible.builtin.debug:
-        msg:
-          - "============================================================"
-          - "VALIDACION DE BACKUP COMPLETADA"
-          - "============================================================"
-          - "Ambiente: {{ environment_name }}"
-          - "Base: {{ mongo_database }}"
-          - "Archivo: {{ backup_file_path }}"
-          - "Tamaño: {{ backup_file_stat.stat.size }} bytes"
-          - "SHA-256: OK"
-          - "Nombre institucional: OK"
-          - "mongodump: {{ mongodb_tools_version }}"
-          - "mongorestore: {{ mongodb_tools_version }}"
-          - "Estado: BACKUP INTEGRO Y PREPARADO PARA PRUEBA DE RESTORE"
-          - "============================================================"
+        - name: Validar version aprobada de mongorestore
+          ansible.builtin.assert:
+            that:
+              - "'mongorestore version: ' ~ mongodb_tools_version in mongorestore_version.stdout"
+            fail_msg: >-
+              [ERROR] Version incorrecta de mongorestore.
+              Esperada: {{ mongodb_tools_version }}
+            success_msg: "[OK] mongorestore {{ mongodb_tools_version }} validado"
+
+        # ============================================================
+        # RESULTADO
+        # ============================================================
+
+        - name: Mostrar resultado final
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "VALIDACION DE BACKUP COMPLETADA"
+              - "============================================================"
+              - "Ambiente: {{ environment_name }}"
+              - "Base: {{ mongo_database }}"
+              - "Archivo: {{ backup_file_path }}"
+              - "Tamaño: {{ backup_file_stat.stat.size }} bytes"
+              - "SHA-256: OK"
+              - "Nombre institucional: OK"
+              - "mongodump: {{ mongodb_tools_version }}"
+              - "mongorestore: {{ mongodb_tools_version }}"
+              - "Estado: BACKUP INTEGRO Y PREPARADO PARA PRUEBA DE RESTORE"
+              - "============================================================"
+
+      rescue:
+        - name: Establecer motivo de fallo de validacion
+          ansible.builtin.set_fact:
+            backup_failure_reason: >-
+              {{
+                (ansible_failed_result.msg
+                 | default(ansible_failed_task.name | default('Fallo durante la validacion post-backup')))
+                | string
+              }}
+
+        - name: Incluir tareas de alerta y notificacion de fallo
+          ansible.builtin.include_tasks: tasks/notify_failure_tasks.yml
+
+        - name: Re-fallar ejecucion para mantener estado fallido
+          ansible.builtin.fail:
+            msg: >-
+              [ERROR] La validacion del respaldo ha fallado:
+              {{ backup_failure_reason }}

@@ -22,456 +22,397 @@
         file: "{{ playbook_dir }}/../../vars/{{ target_environment }}.yml"
 
     # ============================================================
-    # VALIDACION DE CONFIGURACION Y DOCKER
+    # BLOQUE PRINCIPAL DE EJECUCION DE RESPALDO CON NOTIFICACION
     # ============================================================
 
-    - name: Validar algoritmo de checksum configurado
-      ansible.builtin.assert:
-        that:
-          - backup_checksum_algorithm == "sha256"
-        fail_msg: >-
-          [ERROR] Algoritmo de checksum no soportado.
-          Esperado: sha256
-          Configurado: {{ backup_checksum_algorithm }}
-        success_msg: "[OK] Algoritmo de checksum validado: {{ backup_checksum_algorithm }}"
-
-    - name: Validar politica minima de espacio libre
-      ansible.builtin.assert:
-        that:
-          - backup_min_free_percent is defined
-          - (backup_min_free_percent | string) is match('^[0-9]+([.][0-9]+)?$')
-          - backup_min_free_percent | float > 0
-          - backup_min_free_percent | float < 100
-        fail_msg: >-
-          [ERROR] backup_min_free_percent debe ser un valor numerico
-          mayor que 0 y menor que 100.
-        success_msg: >-
-          [OK] Politica minima de espacio libre validada:
-          {{ backup_min_free_percent }}%
-
-    - name: Validar lista de servicios MongoDB para trazabilidad
-      ansible.builtin.assert:
-        that:
-          - mongo_trace_services is defined
-          - mongo_trace_services | type_debug == "list"
-          - mongo_trace_services | length > 0
-          - mongo_trace_services | select('string') | list | length == mongo_trace_services | length
-        fail_msg: >-
-          [ERROR] mongo_trace_services debe ser una lista no vacia
-          de nombres de servicios MongoDB para el ambiente
-          {{ environment_name }}
-        success_msg: >-
-          [OK] Servicios para trazabilidad validados:
-          {{ mongo_trace_services | join(', ') }}
-
-    - name: Verificar si la imagen Docker de respaldos existe localmente
-      ansible.builtin.command:
-        cmd: "docker image inspect {{ mongo_backup_tools_image }}"
-      register: backup_tools_image_check
-      changed_when: false
-      failed_when: false
-
-    - name: Informar si la imagen Docker de respaldos debe construirse
-      ansible.builtin.assert:
-        that:
-          - backup_tools_image_check.rc == 0
-        fail_msg: >-
-          [ERROR] La imagen Docker {{ mongo_backup_tools_image }} no existe localmente.
-          Ejecute primero: ansible-playbook playbooks/backup/backup_tools_image_setup.yml
-        success_msg: "[OK] Imagen Docker de respaldos {{ mongo_backup_tools_image }} encontrada"
-
-    - name: Validar version 100.18.0 dentro de la imagen de respaldos
-      ansible.builtin.command:
-        cmd: "docker run --rm {{ mongo_backup_tools_image }} mongodump --version"
-      register: container_mongodump_version
-      changed_when: false
-
-    - name: Validar version exacta de Database Tools
-      ansible.builtin.assert:
-        that:
-          - "'mongodump version: ' ~ mongodb_tools_version in container_mongodump_version.stdout"
-        fail_msg: >-
-          [ERROR] Version incorrecta de Database Tools en la imagen Docker.
-          Esperada: {{ mongodb_tools_version }}
-        success_msg: "[OK] Database Tools {{ mongodb_tools_version }} validado en contenedor"
-
-    # ============================================================
-    # VALIDACION DE CERTIFICADO CA TLS PARA CLIENTES
-    # ============================================================
-
-    - name: Validar existencia del certificado CA publico en el host
-      ansible.builtin.stat:
-        path: "{{ mongo_tls_ca_cert_path }}"
-      register: host_ca_cert_stat
-
-    - name: Exigir certificado CA publico para conexion segura
-      ansible.builtin.assert:
-        that:
-          - host_ca_cert_stat.stat.exists
-          - host_ca_cert_stat.stat.isreg
-        fail_msg: >-
-          [ERROR] No se encontro el certificado CA publico en el host: {{ mongo_tls_ca_cert_path }}.
-          Asegurese de que la infraestructura PKI este aprovisionada antes de ejecutar el respaldo.
-        success_msg: "[OK] Certificado CA publico verificado en el host: {{ mongo_tls_ca_cert_path }}"
-
-    # ============================================================
-    # IDENTIFICACION DE USUARIO HOST (UID/GID)
-    # ============================================================
-
-    - name: Obtener UID del usuario host
-      ansible.builtin.command:
-        cmd: id -u
-      register: backup_host_uid
-      changed_when: false
-
-    - name: Obtener GID del usuario host
-      ansible.builtin.command:
-        cmd: id -g
-      register: backup_host_gid
-      changed_when: false
-
-    # ============================================================
-    # FECHA, NOMBRE Y RUTAS DEL HOST
-    # ============================================================
-
-    - name: Obtener fecha y hora del respaldo
-      ansible.builtin.shell: |
-        echo "$(date +%Y%m%d_%H%M%S)|$(date +%Y-%m)"
-      register: backup_datetime
-      changed_when: false
-
-    - name: Definir nombres del respaldo
-      ansible.builtin.set_fact:
-        backup_timestamp: "{{ backup_datetime.stdout.split('|')[0] }}"
-        backup_month: "{{ backup_datetime.stdout.split('|')[1] }}"
-
-    - name: Definir rutas del respaldo en el host
-      ansible.builtin.set_fact:
-        backup_directory: "{{ backup_root }}/{{ mongo_database }}/{{ backup_month }}"
-        backup_filename: "{{ mongo_database }}_{{ backup_timestamp }}{{ backup_extension }}"
-        backup_container_name: "mongo_backup_runner_{{ backup_datetime.stdout.split('|')[0] }}"
-
-    - name: Garantizar directorio raiz de respaldos en el host con permisos 0700
-      ansible.builtin.file:
-        path: "{{ backup_root }}"
-        state: directory
-        mode: "0700"
-
-    - name: Crear directorio mensual de respaldo en el host con permisos 0700
-      ansible.builtin.file:
-        path: "{{ backup_directory }}"
-        state: directory
-        mode: "0700"
-
-    - name: Crear directorio de bitacoras en el host con permisos 0700
-      ansible.builtin.file:
-        path: "{{ backup_log_root }}"
-        state: directory
-        mode: "0700"
-
-    # ============================================================
-    # VALIDACION DE ALMACENAMIENTO Y ESPACIO DISPONIBLE
-    # ============================================================
-    # Comprueba la capacidad del filesystem donde reside backup_root.
-    # Si no cumple el umbral minimo (backup_min_free_percent), aborta
-    # antes de ejecutar mongodump para evitar fallos por disco lleno
-    # o respaldos parciales corruptos.
-
-    - name: Consultar capacidad del filesystem del repositorio de respaldos
-      ansible.builtin.command:
-        argv:
-          - df
-          - -Pk
-          - "{{ backup_root }}"
-      register: df_backup_root
-      changed_when: false
-      failed_when: false
-
-    - name: Validar salida estructurada del comando df
-      ansible.builtin.assert:
-        that:
-          - df_backup_root.rc == 0
-          - df_backup_root.stdout_lines | length >= 2
-          - df_backup_root.stdout_lines[-1].split() | length >= 6
-        fail_msg: "[ERROR] No se pudo obtener informacion valida del filesystem con 'df -Pk {{ backup_root }}'."
-        success_msg: "[OK] Salida de filesystem obtenida correctamente"
-
-    - name: Extraer valores numericos de bloques del filesystem
-      ansible.builtin.set_fact:
-        backup_filesystem_total_kb: "{{ df_backup_root.stdout_lines[-1].split()[1] | int }}"
-        backup_filesystem_avail_kb: "{{ df_backup_root.stdout_lines[-1].split()[3] | int }}"
-
-    - name: Validar que el total del filesystem sea mayor a cero
-      ansible.builtin.assert:
-        that:
-          - backup_filesystem_total_kb | int > 0
-        fail_msg: "[ERROR] La capacidad total del filesystem reportada es 0 bloques. Imposible calcular espacio libre."
-        success_msg: "[OK] Capacidad total del filesystem: {{ backup_filesystem_total_kb }} KiB"
-
-    - name: Calcular porcentaje de espacio libre disponible
-      ansible.builtin.set_fact:
-        backup_free_percent: "{{ (((backup_filesystem_avail_kb | float) * 100.0) / (backup_filesystem_total_kb | float)) | round(2) }}"
-
-    - name: Validar espacio suficiente en el filesystem de respaldos
-      ansible.builtin.assert:
-        that:
-          - backup_free_percent | float >= backup_min_free_percent | float
-        fail_msg: >-
-          [ERROR] Espacio insuficiente para ejecutar el respaldo.
-          Disponible: {{ backup_free_percent }}%
-          Minimo requerido: {{ backup_min_free_percent }}%
-          Repositorio: {{ backup_root }}
-        success_msg: "[OK] Espacio disponible para respaldo: {{ backup_free_percent }}% (Minimo requerido: {{ backup_min_free_percent }}%)"
-
-    # ============================================================
-    # TRAZABILIDAD DEL REPLICA SET (INFORMATIVO / LOGS)
-    # ============================================================
-    # La busqueda itera sobre mongo_trace_services (definido por ambiente).
-    # Esta deteccion es exclusivamente para trazabilidad y logs.
-    # La conexion real del backup se realiza mediante mongo_backup_uri.
-
-    - name: Detectar PRIMARY actual para trazabilidad via TLS
-      ansible.builtin.command:
-        argv:
-          - docker
-          - run
-          - --rm
-          - --network
-          - "{{ mongo_backup_network }}"
-          - -v
-          - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
-          - --env
-          - MONGO_ADMIN_USER
-          - --env
-          - MONGO_ADMIN_PASSWORD
-          - "{{ mongo_image }}"
-          - mongosh
-          - --quiet
-          - --nodb
-          - --eval
-          - |
-            const user = process.env.MONGO_ADMIN_USER;
-            const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
-            const db = connect(uri);
-            db.auth(user, pass);
-            print("PRIMARY=" + db.hello().primary);
-      environment:
-        MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
-        MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
-      register: mongo_primary_raw
-      changed_when: false
-      no_log: true
-
-    - name: Interpretar PRIMARY para trazabilidad
-      ansible.builtin.set_fact:
-        mongo_primary: "{{ mongo_primary_raw.stdout_lines | select('match', '^PRIMARY=') | first | regex_replace('^PRIMARY=', '') }}"
-
-    - name: Validar PRIMARY disponible para trazabilidad
-      ansible.builtin.assert:
-        that:
-          - mongo_primary | length > 0
-          - "':' in mongo_primary"
-        fail_msg: "[ERROR] No se pudo detectar un PRIMARY activo"
-        success_msg: "[OK] PRIMARY disponible para trazabilidad: {{ mongo_primary }}"
-
-    - name: Mostrar informacion de conexion HA, espacio y usuario de ejecucion
-      ansible.builtin.debug:
-        msg:
-          - "[OK] PRIMARY detectado (trazabilidad): {{ mongo_primary }}"
-          - "[OK] Espacio libre previo: {{ backup_free_percent }}% (Minimo: {{ backup_min_free_percent }}%)"
-          - "[OK] Servicios evaluados trazabilidad: {{ mongo_trace_services | join(', ') }}"
-          - "[OK] Usuario Host ejecutor: UID={{ backup_host_uid.stdout }} GID={{ backup_host_gid.stdout }}"
-          - "[OK] Red Overlay: {{ mongo_backup_network }}"
-          - "[OK] URI Backup HA: {{ mongo_backup_uri }}"
-          - "[OK] Contenedor Temporal: {{ backup_container_name }}"
-          - "[OK] Database Tools aprobadas: {{ mongodb_tools_version }}"
-
-    # ============================================================
-    # EJECUCION DEL BACKUP CON CONTENEDOR TEMPORAL HA
-    # ============================================================
-    # El contenedor temporal:
-    #   1. Se ejecuta con UID:GID del host para no crear archivos como root
-    #   2. Se conecta a la red overlay Swarm (mongo_backup_network)
-    #   3. Resuelve las semillas indicadas en mongo_backup_uri
-    #   4. Monta {{ backup_directory }} en /backup dentro del contenedor
-    #   5. Ejecuta mongodump generando /backup/{{ backup_filename }}
-    #   6. Se destruye en la clausula 'always' garantizando limpieza absoluta
-    # ============================================================
-
-    - name: Ejecutar respaldo con contenedor temporal y garantia de limpieza
+    - name: Ciclo de ejecucion de respaldo con captura de fallo y notificacion
       block:
-        - name: Ejecutar mongodump dentro del contenedor temporal con UID/GID del host
+
+        # ============================================================
+        # VALIDACION DE CONFIGURACION Y DOCKER
+        # ============================================================
+
+        - name: Validar algoritmo de checksum configurado
+          ansible.builtin.assert:
+            that:
+              - backup_checksum_algorithm == "sha256"
+            fail_msg: >-
+              [ERROR] Algoritmo de checksum no soportado.
+              Esperado: sha256
+              Configurado: {{ backup_checksum_algorithm }}
+            success_msg: "[OK] Algoritmo de checksum validado: {{ backup_checksum_algorithm }}"
+
+        - name: Validar politica minima de espacio libre
+          ansible.builtin.assert:
+            that:
+              - backup_min_free_percent is defined
+              - backup_min_free_percent | int > 0
+              - backup_min_free_percent | int < 100
+            fail_msg: "[ERROR] La politica de espacio libre minimo no es valida"
+            success_msg: "[OK] Politica de espacio libre minimo: {{ backup_min_free_percent }}%"
+
+        - name: Validar variables requeridas de backup HA
+          ansible.builtin.assert:
+            that:
+              - mongo_backup_uri is defined
+              - mongo_backup_uri | length > 0
+              - mongo_backup_network is defined
+              - mongo_backup_network | length > 0
+              - mongo_backup_tools_image is defined
+              - mongo_backup_tools_image | length > 0
+              - mongo_backup_user is defined
+              - mongo_backup_user | length > 0
+              - mongo_backup_password is defined
+              - mongo_backup_password | length > 0
+            fail_msg: "[ERROR] Faltan variables requeridas para el respaldo de alta disponibilidad"
+            success_msg: "[OK] Variables de respaldo HA validadas"
+
+        - name: Validar que la red overlay exista en Docker
+          ansible.builtin.command:
+            cmd: "docker network inspect {{ mongo_backup_network }}"
+          register: network_check
+          changed_when: false
+
+        - name: Validar que la imagen de tools exista localmente
+          ansible.builtin.command:
+            cmd: "docker image inspect {{ mongo_backup_tools_image }}"
+          register: image_check
+          changed_when: false
+
+        - name: Validar existencia del certificado CA publico en el host
+          ansible.builtin.stat:
+            path: "{{ mongo_tls_ca_cert_path }}"
+          register: backup_ca_stat
+
+        - name: Exigir certificado CA publico
+          ansible.builtin.assert:
+            that:
+              - backup_ca_stat.stat.exists
+              - backup_ca_stat.stat.isreg
+            fail_msg: "[ERROR] Certificado CA no encontrado: {{ mongo_tls_ca_cert_path }}"
+            success_msg: "[OK] Certificado CA verificado en el host"
+
+        # ============================================================
+        # PREPARACION DE DIRECTORIOS Y TIMESTAMP
+        # ============================================================
+
+        - name: Generar timestamp institucional
+          ansible.builtin.shell: date +%Y%m%d_%H%M%S
+          register: backup_time
+          changed_when: false
+
+        - name: Obtener mes actual
+          ansible.builtin.shell: date +%Y-%m
+          register: backup_month
+          changed_when: false
+
+        - name: Definir variables del respaldo
+          ansible.builtin.set_fact:
+            backup_timestamp: "{{ backup_time.stdout | trim }}"
+            backup_directory: "{{ backup_root }}/{{ mongo_database }}/{{ backup_month.stdout | trim }}"
+            backup_filename: "{{ mongo_database }}_{{ backup_time.stdout | trim }}{{ backup_extension }}"
+            backup_container_name: "mongo_backup_runner_{{ backup_time.stdout | trim }}"
+
+        - name: Garantizar directorio de respaldos con permisos 0700
+          ansible.builtin.file:
+            path: "{{ backup_directory }}"
+            state: directory
+            mode: "0700"
+
+        - name: Garantizar directorio de bitacoras con permisos 0700
+          ansible.builtin.file:
+            path: "{{ backup_log_root }}"
+            state: directory
+            mode: "0700"
+
+        - name: Obtener UID y GID del usuario del host
+          ansible.builtin.command:
+            cmd: id -u
+          register: backup_host_uid
+          changed_when: false
+
+        - name: Obtener GID del usuario del host
+          ansible.builtin.command:
+            cmd: id -g
+          register: backup_host_gid
+          changed_when: false
+
+        # ============================================================
+        # COMPROBACION DE ESPACIO EN DISCO
+        # ============================================================
+
+        - name: Obtener espacio disponible en disco
+          ansible.builtin.shell: |
+            df -P "{{ backup_directory }}" | awk 'NR==2 {print 100 - $5}'
+          register: disk_free_percent
+          changed_when: false
+
+        - name: Guardar porcentaje de espacio libre
+          ansible.builtin.set_fact:
+            backup_free_percent: "{{ disk_free_percent.stdout | trim }}"
+
+        - name: Validar umbral de espacio en disco
+          ansible.builtin.assert:
+            that:
+              - (backup_free_percent | int) >= (backup_min_free_percent | int)
+            fail_msg: >-
+              [ERROR] Espacio insuficiente en disco.
+              Libre: {{ backup_free_percent }}%
+              Requerido: {{ backup_min_free_percent }}%
+            success_msg: "[OK] Espacio en disco suficiente: {{ backup_free_percent }}% libre"
+
+        # ============================================================
+        # TRAZABILIDAD DEL REPLICA SET
+        # ============================================================
+
+        - name: Consultar PRIMARY actual para trazabilidad via TLS
           ansible.builtin.command:
             argv:
               - docker
               - run
-              - --name
-              - "{{ backup_container_name }}"
-              - --user
-              - "{{ backup_host_uid.stdout }}:{{ backup_host_gid.stdout }}"
+              - --rm
               - --network
               - "{{ mongo_backup_network }}"
-              - --env
-              - MONGO_BACKUP_USER
-              - --env
-              - MONGO_BACKUP_PASSWORD
-              - -v
-              - "{{ backup_directory }}:/backup"
               - -v
               - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
-              - "{{ mongo_backup_tools_image }}"
-              - sh
-              - -ec
+              - --env
+              - MONGO_ADMIN_USER
+              - --env
+              - MONGO_ADMIN_PASSWORD
+              - "{{ mongo_image }}"
+              - mongosh
+              - --quiet
+              - --nodb
+              - --eval
               - |
-                umask 077
-                CFG_FILE="$(mktemp /tmp/mongodump_cfg.XXXXXX)"
-                trap 'rm -f "$CFG_FILE"' EXIT INT TERM
-                printf 'password: |-\n  %s\n' "$MONGO_BACKUP_PASSWORD" > "$CFG_FILE"
-                chmod 0600 "$CFG_FILE"
-                mongodump \
-                  --config="$CFG_FILE" \
-                  --uri="{{ mongo_backup_uri }}" \
-                  --sslCAFile="{{ mongo_tls_client_ca_file }}" \
-                  --username="$MONGO_BACKUP_USER" \
-                  --authenticationDatabase=admin \
-                  --db="{{ mongo_database }}" \
-                  --gzip \
-                  --archive="/backup/{{ backup_filename }}"
+                const user = process.env.MONGO_ADMIN_USER;
+                const pass = process.env.MONGO_ADMIN_PASSWORD;
+                const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+                const db = connect(uri);
+                db.auth(user, pass);
+                print("PRIMARY_DETECTED=" + db.hello().primary);
           environment:
-            MONGO_BACKUP_USER: "{{ mongo_backup_user }}"
-            MONGO_BACKUP_PASSWORD: "{{ mongo_backup_password }}"
-          register: mongodump_result
-          changed_when: true
+            MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+            MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+          register: primary_check
+          changed_when: false
           no_log: true
+
+        - name: Extraer PRIMARY detectado
+          ansible.builtin.set_fact:
+            mongo_primary: >-
+              {{
+                primary_check.stdout_lines
+                | select('match', '^PRIMARY_DETECTED=') | first
+                | regex_replace('^PRIMARY_DETECTED=', '')
+              }}
+          no_log: true
+
+        - name: Validar que se detecto un PRIMARY activo
+          ansible.builtin.assert:
+            that:
+              - mongo_primary is defined
+              - mongo_primary | length > 0
+              - "':' in mongo_primary"
+            fail_msg: "[ERROR] No se pudo identificar un nodo PRIMARY en el Replica Set"
+            success_msg: "[OK] PRIMARY activo identificado: {{ mongo_primary }}"
+
+        # ============================================================
+        # EJECUCION DE MONGODUMP
+        # ============================================================
+
+        - name: Ejecutar respaldo con contenedor temporal y garantia de limpieza
+          block:
+            - name: Ejecutar mongodump dentro del contenedor temporal con UID/GID del host
+              ansible.builtin.command:
+                argv:
+                  - docker
+                  - run
+                  - --name
+                  - "{{ backup_container_name }}"
+                  - --user
+                  - "{{ backup_host_uid.stdout }}:{{ backup_host_gid.stdout }}"
+                  - --network
+                  - "{{ mongo_backup_network }}"
+                  - --env
+                  - MONGO_BACKUP_USER
+                  - --env
+                  - MONGO_BACKUP_PASSWORD
+                  - -v
+                  - "{{ backup_directory }}:/backup"
+                  - -v
+                  - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+                  - "{{ mongo_backup_tools_image }}"
+                  - sh
+                  - -ec
+                  - |
+                    umask 077
+                    CFG_FILE="$(mktemp /tmp/mongodump_cfg.XXXXXX)"
+                    trap 'rm -f "$CFG_FILE"' EXIT INT TERM
+                    printf 'password: |-\n  %s\n' "$MONGO_BACKUP_PASSWORD" > "$CFG_FILE"
+                    chmod 0600 "$CFG_FILE"
+                    mongodump \
+                      --config="$CFG_FILE" \
+                      --uri="{{ mongo_backup_uri }}" \
+                      --sslCAFile="{{ mongo_tls_client_ca_file }}" \
+                      --username="$MONGO_BACKUP_USER" \
+                      --authenticationDatabase=admin \
+                      --db="{{ mongo_database }}" \
+                      --gzip \
+                      --archive="/backup/{{ backup_filename }}"
+              environment:
+                MONGO_BACKUP_USER: "{{ mongo_backup_user }}"
+                MONGO_BACKUP_PASSWORD: "{{ mongo_backup_password }}"
+              register: mongodump_result
+              changed_when: true
+              no_log: true
+
+          rescue:
+            - name: Sanitizar y diagnosticar fallo en mongodump
+              vars:
+                raw_stderr: "{{ mongodump_result.stderr | default(ansible_failed_result.stderr | default('')) }}"
+                raw_stdout: "{{ mongodump_result.stdout | default(ansible_failed_result.stdout | default('')) }}"
+                raw_msg: "{{ ansible_failed_result.msg | default('') }}"
+                sanitized_stderr: >-
+                  {{
+                    raw_stderr
+                    | regex_replace(mongo_backup_password | regex_escape, '[REDACTED]')
+                    | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
+                    | regex_replace('(?m)^password:.*$', 'password: [REDACTED]')
+                  }}
+                sanitized_stdout: >-
+                  {{
+                    raw_stdout
+                    | regex_replace(mongo_backup_password | regex_escape, '[REDACTED]')
+                    | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
+                    | regex_replace('(?m)^password:.*$', 'password: [REDACTED]')
+                  }}
+                sanitized_msg: >-
+                  {{
+                    raw_msg
+                    | regex_replace(mongo_backup_password | regex_escape, '[REDACTED]')
+                    | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
+                  }}
+              ansible.builtin.fail:
+                msg:
+                  error_type: "MONGODUMP_EXECUTION_FAILED"
+                  return_code: "{{ mongodump_result.rc | default(ansible_failed_result.rc | default(-1)) }}"
+                  sanitized_stderr: "{{ sanitized_stderr }}"
+                  sanitized_stdout: "{{ sanitized_stdout }}"
+                  details: "{{ sanitized_msg }}"
+
+          always:
+            - name: Limpiar y eliminar contenedor temporal de respaldo
+              ansible.builtin.command:
+                cmd: "docker rm -f {{ backup_container_name }}"
+              register: container_cleanup
+              changed_when: false
+              failed_when: false
+              no_log: true
+
+        # ============================================================
+        # VALIDACION DEL ARCHIVO GENERADO EN EL HOST Y CHECKSUM
+        # ============================================================
+
+        - name: Obtener informacion del archivo generado en el host
+          ansible.builtin.stat:
+            path: "{{ backup_directory }}/{{ backup_filename }}"
+            checksum_algorithm: sha256
+          register: backup_file
+
+        - name: Validar existencia y tamaño del respaldo en el host
+          ansible.builtin.assert:
+            that:
+              - backup_file.stat.exists
+              - backup_file.stat.isreg
+              - backup_file.stat.size | int > 0
+            fail_msg: "[ERROR] El archivo de respaldo no fue generado correctamente"
+            success_msg: "[OK] Archivo de respaldo generado correctamente en el host"
+
+        - name: Generar archivo SHA-256 en el host
+          ansible.builtin.shell: |
+            cd "{{ backup_directory }}"
+            sha256sum "{{ backup_filename }}" > "{{ backup_filename }}.sha256"
+          changed_when: true
+
+        - name: Validar checksum SHA-256 en el host
+          ansible.builtin.shell: |
+            cd "{{ backup_directory }}"
+            sha256sum -c "{{ backup_filename }}.sha256"
+          register: checksum_validation
+          changed_when: false
+
+        - name: Confirmar integridad del respaldo
+          ansible.builtin.assert:
+            that:
+              - checksum_validation.rc == 0
+            fail_msg: "[ERROR] Fallo la validacion SHA-256 del respaldo"
+            success_msg: "[OK] Integridad SHA-256 validada en el host"
+
+        # ============================================================
+        # BITACORA
+        # ============================================================
+
+        - name: Registrar respaldo en bitacora
+          ansible.builtin.lineinfile:
+            path: "{{ backup_log_root }}/{{ backup_log_filename }}"
+            create: true
+            mode: "0600"
+            insertafter: EOF
+            line: >-
+              {{ backup_timestamp }}
+              | environment={{ environment_name }}
+              | database={{ mongo_database }}
+              | primary={{ mongo_primary }}
+              | replica_set={{ mongo_replica_set }}
+              | network={{ mongo_backup_network }}
+              | tools_version={{ mongodb_tools_version }}
+              | file={{ backup_filename }}
+              | size={{ backup_file.stat.size }}
+              | checksum=OK
+              | free_space_percent_before={{ backup_free_percent }}
+              | result=SUCCESS
+
+        # ============================================================
+        # RESULTADO
+        # ============================================================
+
+        - name: Resultado final del respaldo HA
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "BACKUP MONGODB HA GENERADO EXITOSAMENTE"
+              - "============================================================"
+              - "Ambiente: {{ environment_name }}"
+              - "Base: {{ mongo_database }}"
+              - "PRIMARY (trazabilidad): {{ mongo_primary }}"
+              - "Espacio libre previo: {{ backup_free_percent }}% (Minimo: {{ backup_min_free_percent }}%)"
+              - "Usuario Host ejecutor: UID={{ backup_host_uid.stdout }} GID={{ backup_host_gid.stdout }}"
+              - "Red Overlay: {{ mongo_backup_network }}"
+              - "URI Backup HA: {{ mongo_backup_uri }}"
+              - "Contenedor temporal: {{ backup_container_name }} (eliminado)"
+              - "MongoDB Database Tools: {{ mongodb_tools_version }}"
+              - "Archivo host: {{ backup_directory }}/{{ backup_filename }}"
+              - "Checksum host: {{ backup_directory }}/{{ backup_filename }}.sha256"
+              - "Tamaño: {{ backup_file.stat.size }} bytes"
+              - "Integridad: OK"
+              - "============================================================"
 
       rescue:
-        - name: Sanitizar y diagnosticar fallo en mongodump
-          vars:
-            raw_stderr: "{{ mongodump_result.stderr | default(ansible_failed_result.stderr | default('')) }}"
-            raw_stdout: "{{ mongodump_result.stdout | default(ansible_failed_result.stdout | default('')) }}"
-            raw_msg: "{{ ansible_failed_result.msg | default('') }}"
-            sanitized_stderr: >-
+        - name: Establecer motivo de fallo para notificacion
+          ansible.builtin.set_fact:
+            backup_failure_reason: >-
               {{
-                raw_stderr
-                | regex_replace(mongo_backup_password | regex_escape, '[REDACTED]')
-                | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
-                | regex_replace('(?m)^password:.*$', 'password: [REDACTED]')
+                (ansible_failed_result.msg
+                 | default(ansible_failed_task.name | default('Fallo durante la generacion o validacion del respaldo')))
+                | string
               }}
-            sanitized_stdout: >-
-              {{
-                raw_stdout
-                | regex_replace(mongo_backup_password | regex_escape, '[REDACTED]')
-                | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
-                | regex_replace('(?m)^password:.*$', 'password: [REDACTED]')
-              }}
-            sanitized_msg: >-
-              {{
-                raw_msg
-                | regex_replace(mongo_backup_password | regex_escape, '[REDACTED]')
-                | regex_replace('mongodb://[^/\s]+:[^@\s]+@', 'mongodb://[REDACTED]:[REDACTED]@')
-              }}
+
+        - name: Incluir tareas de alerta y notificacion de fallo
+          ansible.builtin.include_tasks: tasks/notify_failure_tasks.yml
+
+        - name: Re-fallar ejecucion para mantener estado fallido
           ansible.builtin.fail:
-            msg:
-              error_type: "MONGODUMP_EXECUTION_FAILED"
-              return_code: "{{ mongodump_result.rc | default(ansible_failed_result.rc | default(-1)) }}"
-              sanitized_stderr: "{{ sanitized_stderr }}"
-              sanitized_stdout: "{{ sanitized_stdout }}"
-              details: "{{ sanitized_msg }}"
-
-      always:
-        - name: Limpiar y eliminar contenedor temporal de respaldo
-          ansible.builtin.command:
-            cmd: "docker rm -f {{ backup_container_name }}"
-          register: container_cleanup
-          changed_when: false
-          failed_when: false
-          no_log: true
-
-    # ============================================================
-    # VALIDACION DEL ARCHIVO GENERADO EN EL HOST Y CHECKSUM
-    # ============================================================
-
-    - name: Obtener informacion del archivo generado en el host
-      ansible.builtin.stat:
-        path: "{{ backup_directory }}/{{ backup_filename }}"
-        checksum_algorithm: sha256
-      register: backup_file
-
-    - name: Validar existencia y tamaño del respaldo en el host
-      ansible.builtin.assert:
-        that:
-          - backup_file.stat.exists
-          - backup_file.stat.isreg
-          - backup_file.stat.size | int > 0
-        fail_msg: "[ERROR] El archivo de respaldo no fue generado correctamente"
-        success_msg: "[OK] Archivo de respaldo generado correctamente en el host"
-
-    - name: Generar archivo SHA-256 en el host
-      ansible.builtin.shell: |
-        cd "{{ backup_directory }}"
-        sha256sum "{{ backup_filename }}" > "{{ backup_filename }}.sha256"
-      changed_when: true
-
-    - name: Validar checksum SHA-256 en el host
-      ansible.builtin.shell: |
-        cd "{{ backup_directory }}"
-        sha256sum -c "{{ backup_filename }}.sha256"
-      register: checksum_validation
-      changed_when: false
-
-    - name: Confirmar integridad del respaldo
-      ansible.builtin.assert:
-        that:
-          - checksum_validation.rc == 0
-        fail_msg: "[ERROR] Fallo la validacion SHA-256 del respaldo"
-        success_msg: "[OK] Integridad SHA-256 validada en el host"
-
-    # ============================================================
-    # BITACORA
-    # ============================================================
-
-    - name: Registrar respaldo en bitacora
-      ansible.builtin.lineinfile:
-        path: "{{ backup_log_root }}/{{ backup_log_filename }}"
-        create: true
-        mode: "0600"
-        insertafter: EOF
-        line: >-
-          {{ backup_timestamp }}
-          | environment={{ environment_name }}
-          | database={{ mongo_database }}
-          | primary={{ mongo_primary }}
-          | replica_set={{ mongo_replica_set }}
-          | network={{ mongo_backup_network }}
-          | tools_version={{ mongodb_tools_version }}
-          | file={{ backup_filename }}
-          | size={{ backup_file.stat.size }}
-          | checksum=OK
-          | free_space_percent_before={{ backup_free_percent }}
-          | result=SUCCESS
-
-    # ============================================================
-    # RESULTADO
-    # ============================================================
-
-    - name: Resultado final del respaldo HA
-      ansible.builtin.debug:
-        msg:
-          - "============================================================"
-          - "BACKUP MONGODB HA GENERADO EXITOSAMENTE"
-          - "============================================================"
-          - "Ambiente: {{ environment_name }}"
-          - "Base: {{ mongo_database }}"
-          - "PRIMARY (trazabilidad): {{ mongo_primary }}"
-          - "Espacio libre previo: {{ backup_free_percent }}% (Minimo: {{ backup_min_free_percent }}%)"
-          - "Usuario Host ejecutor: UID={{ backup_host_uid.stdout }} GID={{ backup_host_gid.stdout }}"
-          - "Red Overlay: {{ mongo_backup_network }}"
-          - "URI Backup HA: {{ mongo_backup_uri }}"
-          - "Contenedor temporal: {{ backup_container_name }} (eliminado)"
-          - "MongoDB Database Tools: {{ mongodb_tools_version }}"
-          - "Archivo host: {{ backup_directory }}/{{ backup_filename }}"
-          - "Checksum host: {{ backup_directory }}/{{ backup_filename }}.sha256"
-          - "Tamaño: {{ backup_file.stat.size }} bytes"
-          - "Integridad: OK"
-          - "============================================================"
+            msg: >-
+              [ERROR] El proceso de respaldo ha fallado:
+              {{ backup_failure_reason }}

@@ -50,3 +50,20 @@ backups/**/*.archive.gz.sha256
 
 # Local secrets
 secrets/vault_password
+
+# Runtime logs
+logs/*.log
+logs/*.lock
+logs/tls_rollout_state.json
+logs/tls_update_spec_*.json
+
+# MongoDB backup artifacts
+backups/**/*.archive.gz
+backups/**/*.archive.gz.sha256
+
+# Local secrets
+secrets/vault_password
+
+# Python runtime
+**/__pycache__/
+*.pyc
