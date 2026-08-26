@@ -1,0 +1,30 @@
+---
+- name: Recuperar mongo1
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  tasks:
+
+    - name: Levantar mongo1
+      ansible.builtin.command:
+        cmd: docker service scale mongo1=1
+      register: scale_result
+      changed_when: true
+
+    - name: Esperar mongo1
+      ansible.builtin.command:
+        cmd: docker service ls --filter name=mongo1 --format "{{ '{{.Replicas}}' }}"
+      register: mongo_replicas
+      retries: 30
+      delay: 3
+      until: mongo_replicas.stdout | trim == "1/1"
+      changed_when: false
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "MONGO1 RECUPERADO"
+          - "============================================================"
+          - "[OK] mongo1: {{ mongo_replicas.stdout | trim }}"

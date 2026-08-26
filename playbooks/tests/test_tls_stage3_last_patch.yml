@@ -1,0 +1,206 @@
+---
+- name: Simulaciones aisladas del ultimo parche TLS Etapa 3
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    mongo_tls_service_names: [mongo1, mongo2, mongo3]
+    disabled_spec:
+      ID: service-mongo1
+      Spec:
+        Name: mongo1
+        EndpointSpec: {Mode: vip}
+        TaskTemplate:
+          ContainerSpec:
+            Command: [/bin/sh]
+            Args:
+              - -ec
+              - "wrapper contiene --tlsMode allowTLS pero el modo posicional manda"
+              - --
+              - "999"
+              - "999"
+              - /usr/local/bin/docker-entrypoint.sh
+              - disabled
+              - mongo1
+            Mounts:
+              - {Type: volume, Source: mongo1_data, Target: /data/db}
+              - {Type: volume, Source: mongo1_tls_control, Target: /run/tls-control}
+            Secrets:
+              - {SecretID: key-id, SecretName: mongo_keyfile}
+    allowtls_spec:
+      ID: service-mongo2
+      Spec:
+        Name: mongo2
+        EndpointSpec: {Mode: vip}
+        TaskTemplate:
+          ContainerSpec:
+            Command: [/bin/sh]
+            Args:
+              - -ec
+              - wrapper
+              - --
+              - "999"
+              - "999"
+              - /usr/local/bin/docker-entrypoint.sh
+              - allowTLS
+              - mongo2
+            Mounts:
+              - {Type: volume, Source: mongo2_data, Target: /data/db}
+              - {Type: volume, Source: mongo2_tls_control, Target: /run/tls-control}
+              - {Type: tmpfs, Target: /run/mongo-tls}
+            Secrets:
+              - {SecretID: key-id, SecretName: mongo_keyfile}
+              - {SecretID: ca-id, SecretName: mongo_tls_ca_v1}
+              - {SecretID: pem-id, SecretName: mongo2_tls_pem_v1}
+    historical_spec:
+      ID: service-mongo3
+      Spec:
+        Name: mongo3
+        EndpointSpec: {Mode: vip}
+        TaskTemplate:
+          ContainerSpec:
+            Args: [mongod, --replSet, rs0]
+            Mounts:
+              - {Type: volume, Source: mongo3_data, Target: /data/db}
+            Secrets:
+              - {SecretID: key-id, SecretName: mongo_keyfile}
+    unknown_spec:
+      ID: service-mongo1
+      Spec:
+        Name: mongo1
+        EndpointSpec: {Mode: vip}
+        TaskTemplate:
+          ContainerSpec:
+            Command: [/bin/sh]
+            Args: [-ec, wrapper, --, "999", "999", /entrypoint, disabled, mongo2]
+            Mounts:
+              - {Type: volume, Source: mongo1_data, Target: /data/db}
+              - {Type: volume, Source: mongo1_tls_control, Target: /run/tls-control}
+            Secrets:
+              - {SecretID: key-id, SecretName: mongo_keyfile}
+
+  tasks:
+    - name: Clasificar fixture permanent_disabled
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../mongodb/tasks/tls_classify_service_specs.yml"
+      vars:
+        mongo_tls_service_inspects: ["{{ disabled_spec }}"]
+
+    - name: Guardar resultado permanent_disabled
+      ansible.builtin.set_fact:
+        test_mode_disabled: "{{ mongo_tls_classified_spec_modes.mongo1 }}"
+
+    - name: Clasificar fixture permanent_allowtls
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../mongodb/tasks/tls_classify_service_specs.yml"
+      vars:
+        mongo_tls_service_inspects: ["{{ allowtls_spec }}"]
+
+    - name: Guardar resultado permanent_allowtls
+      ansible.builtin.set_fact:
+        test_mode_allowtls: "{{ mongo_tls_classified_spec_modes.mongo2 }}"
+
+    - name: Clasificar fixture historical_disabled
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../mongodb/tasks/tls_classify_service_specs.yml"
+      vars:
+        mongo_tls_service_inspects: ["{{ historical_spec }}"]
+
+    - name: Guardar resultado historical_disabled
+      ansible.builtin.set_fact:
+        test_mode_historical: "{{ mongo_tls_classified_spec_modes.mongo3 }}"
+
+    - name: Clasificar fixture unknown
+      ansible.builtin.include_tasks: "{{ playbook_dir }}/../mongodb/tasks/tls_classify_service_specs.yml"
+      vars:
+        mongo_tls_service_inspects: ["{{ unknown_spec }}"]
+
+    - name: Guardar resultado unknown
+      ansible.builtin.set_fact:
+        test_mode_unknown: "{{ mongo_tls_classified_spec_modes.mongo1 }}"
+
+    - name: Validar clasificador y decisiones exactas de recovery
+      ansible.builtin.assert:
+        that:
+          - test_mode_disabled == 'permanent_disabled'
+          - test_mode_allowtls == 'permanent_allowtls'
+          - test_mode_historical == 'historical_disabled'
+          - test_mode_unknown == 'unknown'
+          - ([test_mode_disabled] * 3) | select('equalto', 'permanent_disabled') | list | length == 3
+          - ([test_mode_allowtls] * 3) | select('equalto', 'permanent_allowtls') | list | length == 3
+          - ([test_mode_historical] * 3) | select('equalto', 'permanent_disabled') | list | length == 0
+          - ([test_mode_disabled, test_mode_disabled, test_mode_historical] | select('equalto', 'permanent_disabled') | list | length) != 3
+          - test_mode_unknown not in ['permanent_disabled', 'permanent_allowtls']
+
+    - name: Definir tasks simuladas T0 T1 T2
+      ansible.builtin.set_fact:
+        t0: {task_id: T0, container_id: C0}
+        t1: {task_id: T1, container_id: C1}
+        t2: {task_id: T2, container_id: C2}
+
+    - name: Validar baseline forward T0 a T1 y rollback T1 a T2
+      ansible.builtin.assert:
+        that:
+          - t0.task_id != t1.task_id
+          - t0.container_id != t1.container_id
+          - t1.task_id != t2.task_id
+          - t1.container_id != t2.container_id
+          - t1.task_id != t0.task_id
+          - rollback_source is search('mongo_tls_barrier_old_task_info.*mongo_tls_rollback_old_task_info')
+          - rollout_source is search('mongo_tls_barrier_old_task_info.*mongo_tls_old_task_info')
+          - gate_wait_source is not search('mongo_tls_old_task_info\[')
+      vars:
+        rollback_source: "{{ lookup('file', playbook_dir ~ '/../mongodb/tasks/tls_rollback_transition.yml') }}"
+        rollout_source: "{{ lookup('file', playbook_dir ~ '/../mongodb/tls_rollout.yml') }}"
+        gate_wait_source: "{{ lookup('file', playbook_dir ~ '/../mongodb/tasks/tls_gate_wait.yml') }}"
+
+    - name: Simular deadlines forward y rollback independientes
+      ansible.builtin.set_fact:
+        test_forward_now: 1000
+        test_rollback_now: 1420
+        test_forward_deadline: 1600
+        test_rollback_deadline: 2020
+
+    - name: Validar deadlines calculados desde epochs independientes
+      ansible.builtin.assert:
+        that:
+          - test_forward_deadline == test_forward_now + 600
+          - test_rollback_deadline == test_rollback_now + 600
+          - test_rollback_deadline != test_forward_deadline
+          - rollout_source is not search('ansible_date_time\.epoch')
+          - rollback_source is not search('ansible_date_time\.epoch')
+      vars:
+        rollout_source: "{{ lookup('file', playbook_dir ~ '/../mongodb/tls_rollout.yml') }}"
+        rollback_source: "{{ lookup('file', playbook_dir ~ '/../mongodb/tasks/tls_rollback_transition.yml') }}"
+
+    - name: Validar matriz de TLS runtime para rollback
+      ansible.builtin.assert:
+        that:
+          - runtime_all_disabled | select('equalto', 'disabled') | list | length == 3
+          - runtime_one_allowtls | select('equalto', 'disabled') | list | length != 3
+          - runtime_specs_disabled_but_active | select('equalto', 'disabled') | list | length != 3
+          - runtime_unknown | select('equalto', 'disabled') | list | length != 3
+      vars:
+        runtime_all_disabled: [disabled, disabled, disabled]
+        runtime_one_allowtls: [disabled, disabled, allowTLS]
+        runtime_specs_disabled_but_active: [disabled, disabled, allowTLS]
+        runtime_unknown: [disabled, disabled, unknown]
+
+    - name: Simular decisiones del gate generacional
+      ansible.builtin.set_fact:
+        gate_active_operation_id: abc
+        gate_matching_start: abc
+        gate_stale_start: xyz
+        gate_empty_start: ""
+        gate_missing_action: wait
+
+    - name: Validar gate generacional fail-closed
+      ansible.builtin.assert:
+        that:
+          - gate_matching_start == gate_active_operation_id
+          - gate_stale_start != gate_active_operation_id
+          - gate_empty_start | length == 0
+          - gate_missing_action == 'wait'
+          - release_source is search("printf 'operation_id=%s")
+          - wrapper_source is search('START_OP_ID')
+          - wrapper_source is search('START_CONTENT')
+      vars:
+        release_source: "{{ lookup('file', playbook_dir ~ '/../mongodb/tasks/tls_gate_release.yml') }}"
+        wrapper_source: "{{ lookup('file', playbook_dir ~ '/../mongodb/tasks/tls_runtime_facts.yml') }}"

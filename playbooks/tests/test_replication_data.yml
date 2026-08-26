@@ -1,0 +1,114 @@
+---
+- name: Crear datos para prueba de replicacion MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    test_database: "prueba_ha"
+    test_collection: "registros"
+
+  tasks:
+
+    - name: Obtener contenedor mongo1
+      ansible.builtin.shell:
+        cmd: docker ps -q --filter name=mongo1
+      register: mongo1_container
+      changed_when: false
+
+    - name: Validar contenedor mongo1
+      ansible.builtin.assert:
+        that:
+          - mongo1_container.stdout | trim != ""
+        fail_msg: "ERROR: No se encontro mongo1."
+        success_msg: "OK: Contenedor mongo1 encontrado."
+
+    - name: Consultar PRIMARY actual
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.hello().primary"
+      register: current_primary
+      changed_when: false
+      no_log: true
+
+    - name: Mostrar PRIMARY actual
+      ansible.builtin.debug:
+        msg: "PRIMARY actual: {{ current_primary.stdout | trim }}"
+
+    - name: Insertar documento de prueba
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.getSiblingDB('{{ test_database }}').{{ test_collection }}.updateOne(
+            { prueba: 'alta_disponibilidad_v2' },
+            {
+              $set: {
+                prueba: 'alta_disponibilidad_v2',
+                descripcion: 'Documento para validar replicacion y failover',
+                estado: 'ACTIVO'
+              }
+            },
+            { upsert: true }
+          ).acknowledged"
+      register: insert_result
+      changed_when: true
+      no_log: true
+
+    - name: Validar escritura
+      ansible.builtin.assert:
+        that:
+          - insert_result.stdout | trim == "true"
+        fail_msg: "ERROR: No fue posible escribir el documento de prueba."
+        success_msg: "OK: Documento almacenado correctamente."
+
+    - name: Consultar documento creado
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "JSON.stringify(
+            db.getSiblingDB('{{ test_database }}').{{ test_collection }}.findOne(
+              { prueba: 'alta_disponibilidad_v2' },
+              { _id: 0 }
+            )
+          )"
+      register: test_document
+      changed_when: false
+      no_log: true
+
+    - name: Validar existencia del documento
+      ansible.builtin.assert:
+        that:
+          - "'alta_disponibilidad_v2' in test_document.stdout"
+          - "'ACTIVO' in test_document.stdout"
+        fail_msg: "ERROR: El documento no fue encontrado."
+        success_msg: "OK: Documento de prueba encontrado."
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "PRUEBA DE DATOS PARA REPLICACION"
+          - "============================================================"
+          - "[OK] PRIMARY: {{ current_primary.stdout | trim }}"
+          - "[OK] Base de datos: {{ test_database }}"
+          - "[OK] Coleccion: {{ test_collection }}"
+          - "[OK] Documento: alta_disponibilidad_v2"
+          - "[OK] Estado: ACTIVO"
+          - "[OK] Escritura confirmada"
+          - "============================================================"

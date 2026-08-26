@@ -1,0 +1,464 @@
+---
+- name: Validar supuestos runtime de la imagen MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+
+  vars:
+    mongo_image_runtime_user: >-
+      {{ mongo_image_runtime_user_override
+         | default(mongo_image_expected_runtime_user, true) }}
+    mongo_image_runtime_group: >-
+      {{ mongo_image_runtime_group_override
+         | default(mongo_image_expected_runtime_group, true) }}
+    mongo_image_entrypoint: >-
+      {{ mongo_image_entrypoint_override
+         | default(mongo_image_expected_entrypoint, true) }}
+
+  tasks:
+    - name: Detectar residuos propios de preflight por labels
+      ansible.builtin.command:
+        argv:
+          - docker
+          - ps
+          - -aq
+          - --filter
+          - label=tls.preflight=true
+          - --filter
+          - label=tls.managed_by=ansible
+      register: mongo_tls_preflight_residue_ids
+      changed_when: false
+
+    - name: Inspeccionar residuos etiquetados antes de limpiar
+      ansible.builtin.command:
+        argv:
+          - docker
+          - inspect
+          - '{{ item }}'
+      loop: '{{ mongo_tls_preflight_residue_ids.stdout_lines }}'
+      register: mongo_tls_preflight_residue_inspections
+      changed_when: false
+
+    - name: Confirmar propiedad de residuos etiquetados
+      ansible.builtin.assert:
+        that:
+          - residue_labels.get('tls.preflight') == 'true'
+          - residue_labels.get('tls.managed_by') == 'ansible'
+        fail_msg: 'Residuo no cumple labels de propiedad; limpieza abortada.'
+      vars:
+        residue_labels: >-
+          {{ (item.stdout | from_json | first).Config.Labels | default({}) }}
+      loop: '{{ mongo_tls_preflight_residue_inspections.results }}'
+      loop_control:
+        label: '{{ item.item }}'
+
+    - name: Limpiar residuos antiguos propios del preflight
+      ansible.builtin.command:
+        argv:
+          - docker
+          - rm
+          - -f
+          - '{{ item }}'
+      loop: '{{ mongo_tls_preflight_residue_ids.stdout_lines }}'
+      changed_when: true
+
+    - name: Generar timestamp para nombres de sondas
+      ansible.builtin.command:
+        argv:
+          - date
+          - +%s
+      register: mongo_tls_preflight_timestamp
+      changed_when: false
+
+    - name: Generar sufijo aleatorio seguro para sondas
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - rand
+          - -hex
+          - '8'
+      register: mongo_tls_preflight_random
+      changed_when: false
+
+    - name: Construir identificador unico del preflight
+      ansible.builtin.set_fact:
+        mongo_tls_preflight_run_id: >-
+          {{ mongo_tls_preflight_timestamp.stdout | trim }}-{{
+          mongo_tls_preflight_random.stdout | trim }}
+
+    - name: Validar invariantes del estado TLS
+      ansible.builtin.assert:
+        that:
+          - mongo_tls_deployment_mode in ['disabled', 'allowTLS', 'preferTLS', 'requireTLS']
+          - (mongo_tls_enabled | bool) or mongo_tls_deployment_mode == 'disabled'
+          - mongo_tls_deployment_mode == 'disabled' or (mongo_tls_enabled | bool)
+          - not (mongo_tls_clients_enabled | bool) or (mongo_tls_enabled | bool)
+        fail_msg: "Las variables TLS incumplen las invariantes aprobadas."
+
+    - name: Inspeccionar la imagen MongoDB disponible localmente
+      ansible.builtin.command:
+        argv:
+          - docker
+          - image
+          - inspect
+          - "{{ mongo_image }}"
+      register: mongo_image_inspect_raw
+      changed_when: false
+
+    - name: Interpretar metadatos de la imagen
+      ansible.builtin.set_fact:
+        mongo_image_metadata: "{{ (mongo_image_inspect_raw.stdout | from_json) | first }}"
+
+    - name: Validar que la imagen declare un entrypoint
+      ansible.builtin.assert:
+        that:
+          - mongo_image_metadata.Config.Entrypoint is defined
+          - mongo_image_metadata.Config.Entrypoint is not none
+          - mongo_image_metadata.Config.Entrypoint | length > 0
+        fail_msg: "La imagen {{ mongo_image }} no declara Config.Entrypoint."
+
+    - name: Registrar metadatos no sensibles de la imagen
+      ansible.builtin.debug:
+        msg:
+          image: "{{ mongo_image }}"
+          image_id: "{{ mongo_image_metadata.Id }}"
+          repo_digests: "{{ mongo_image_metadata.RepoDigests | default([], true) }}"
+          architecture: "{{ mongo_image_metadata.Architecture }}"
+          config_user: "{{ mongo_image_metadata.Config.User | default('', true) }}"
+          config_entrypoint: "{{ mongo_image_metadata.Config.Entrypoint }}"
+          config_cmd: "{{ mongo_image_metadata.Config.Cmd | default([], true) }}"
+
+    - name: Detectar identidad, entrypoint y mongod dentro de la imagen
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - none
+          - --name
+          - 'mongo-tls-preflight-{{ mongo_tls_preflight_run_id }}-runtime'
+          - --label
+          - tls.preflight=true
+          - --label
+          - tls.managed_by=ansible
+          - --entrypoint
+          - /bin/sh
+          - "{{ mongo_image }}"
+          - -ec
+          - |
+              runtime_user="$1"
+              expected_entrypoint="$2"
+              declared_entrypoint="$3"
+
+              id "$runtime_user" >/dev/null
+              runtime_uid="$(id -u "$runtime_user")"
+              runtime_gid="$(id -g "$runtime_user")"
+              runtime_group="$(id -gn "$runtime_user")"
+
+              expected_resolved="$(readlink -f "$expected_entrypoint")"
+              declared_command="$(command -v "$declared_entrypoint")"
+              declared_resolved="$(readlink -f "$declared_command")"
+
+              test -f "$expected_resolved"
+              test -x "$expected_resolved"
+
+              entrypoint_mode="$(stat -c '%a' "$expected_resolved")"
+              entrypoint_owner="$(stat -c '%U' "$expected_resolved")"
+              entrypoint_group="$(stat -c '%G' "$expected_resolved")"
+              mongod_path="$(readlink -f "$(command -v mongod)")"
+              test -x "$mongod_path"
+
+              printf '{"uid":"%s","gid":"%s","primary_group":"%s","expected_entrypoint":"%s","declared_entrypoint":"%s","entrypoint_mode":"%s","entrypoint_owner":"%s","entrypoint_group":"%s","mongod_path":"%s"}\n' \
+                "$runtime_uid" "$runtime_gid" "$runtime_group" \
+                "$expected_resolved" "$declared_resolved" \
+                "$entrypoint_mode" "$entrypoint_owner" \
+                "$entrypoint_group" "$mongod_path"
+          - --
+          - "{{ mongo_image_runtime_user }}"
+          - "{{ mongo_image_entrypoint }}"
+          - "{{ mongo_image_metadata.Config.Entrypoint[0] }}"
+      register: mongo_image_runtime_raw
+      changed_when: false
+
+    - name: Interpretar datos runtime detectados
+      ansible.builtin.set_fact:
+        mongo_image_runtime: "{{ mongo_image_runtime_raw.stdout | from_json }}"
+
+    - name: Validar usuario, grupo y entrypoint esperados
+      ansible.builtin.assert:
+        that:
+          - mongo_image_runtime.primary_group == mongo_image_runtime_group
+          - mongo_image_runtime.expected_entrypoint == mongo_image_entrypoint
+          - mongo_image_runtime.declared_entrypoint == mongo_image_entrypoint
+          - mongo_image_runtime.entrypoint_owner == 'root'
+          - mongo_image_runtime.entrypoint_group == 'root'
+          - mongo_image_runtime.entrypoint_mode is match('^[0-7][0145][0145]$')
+          - >-
+            mongo_image_mongod_path_override is none or
+            mongo_image_runtime.mongod_path == mongo_image_mongod_path_override
+        fail_msg: >-
+          La identidad runtime, el entrypoint declarado o sus permisos no
+          coinciden con los supuestos aprobados para {{ mongo_image }}.
+
+    - name: Consultar version real de mongod sin iniciar el servidor
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - none
+          - --name
+          - 'mongo-tls-preflight-{{ mongo_tls_preflight_run_id }}-version'
+          - --label
+          - tls.preflight=true
+          - --label
+          - tls.managed_by=ansible
+          - --entrypoint
+          - "{{ mongo_image_runtime.mongod_path }}"
+          - "{{ mongo_image }}"
+          - --version
+      register: mongo_image_mongod_version
+      changed_when: false
+
+    - name: Validar que la imagen contiene MongoDB 7
+      ansible.builtin.assert:
+        that:
+          - mongo_image_mongod_version.stdout is search('db version v7[.]')
+        fail_msg: "La imagen {{ mongo_image }} no contiene la version esperada de MongoDB 7."
+
+    - name: Probar materializacion segura en tmpfs con archivos dummy
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - none
+          - --name
+          - 'mongo-tls-preflight-{{ mongo_tls_preflight_run_id }}-tmpfs'
+          - --label
+          - tls.preflight=true
+          - --label
+          - tls.managed_by=ansible
+          - --tmpfs
+          - /run/mongo-tls:rw,noexec,nosuid,nodev,mode=0700
+          - --entrypoint
+          - /bin/sh
+          - "{{ mongo_image }}"
+          - -ec
+          - |
+              runtime_user="$1"
+              runtime_uid="$2"
+              runtime_gid="$3"
+              runtime_dir=/run/mongo-tls
+
+              run_as() {
+                target_user="$1"
+                shift
+                if command -v gosu >/dev/null 2>&1; then
+                  gosu "$target_user" "$@"
+                elif command -v runuser >/dev/null 2>&1; then
+                  runuser -u "$target_user" -- "$@"
+                else
+                  echo 'No existe una herramienta segura para cambiar de usuario.' >&2
+                  return 127
+                fi
+              }
+
+              chmod 0700 "$runtime_dir"
+              chown "$runtime_uid:$runtime_gid" "$runtime_dir"
+              printf '%s\n' '-----BEGIN PRIVATE KEY-----' 'DUMMY' '-----END PRIVATE KEY-----' > "$runtime_dir/mongo.pem"
+              printf '%s\n' '-----BEGIN CERTIFICATE-----' 'DUMMY' '-----END CERTIFICATE-----' > "$runtime_dir/mongo_ca.pem"
+              chown "$runtime_uid:$runtime_gid" "$runtime_dir/mongo.pem" "$runtime_dir/mongo_ca.pem"
+              chmod 0400 "$runtime_dir/mongo.pem"
+              chmod 0440 "$runtime_dir/mongo_ca.pem"
+
+              test "$(stat -c '%a' "$runtime_dir")" = '700'
+              test "$(stat -c '%u:%g' "$runtime_dir")" = "$runtime_uid:$runtime_gid"
+              test "$(stat -c '%a' "$runtime_dir/mongo.pem")" = '400'
+              test "$(stat -c '%a' "$runtime_dir/mongo_ca.pem")" = '440'
+              run_as "$runtime_user" test -r "$runtime_dir/mongo.pem"
+              run_as "$runtime_user" test -r "$runtime_dir/mongo_ca.pem"
+
+              unauthorized_checked=false
+              if id nobody >/dev/null 2>&1 && [ "$(id -u nobody)" != "$runtime_uid" ]; then
+                run_as nobody test ! -r "$runtime_dir/mongo.pem"
+                run_as nobody test ! -r "$runtime_dir/mongo_ca.pem"
+                unauthorized_checked=true
+              fi
+
+              printf '{"runtime_dir_mode":"700","pem_mode":"400","ca_mode":"440","unauthorized_user_checked":%s}\n' "$unauthorized_checked"
+          - --
+          - "{{ mongo_image_runtime_user }}"
+          - "{{ mongo_image_runtime.uid }}"
+          - "{{ mongo_image_runtime.gid }}"
+      register: mongo_image_tmpfs_test_raw
+      changed_when: false
+
+    - name: Interpretar resultado del test tmpfs
+      ansible.builtin.set_fact:
+        mongo_image_tmpfs_test: "{{ mongo_image_tmpfs_test_raw.stdout | from_json }}"
+
+    - name: Detectar identidad efectiva de un proceso mongod efimero
+      block:
+        - name: Iniciar mongod aislado con almacenamiento tmpfs
+          ansible.builtin.command:
+            argv:
+              - docker
+              - run
+              - --detach
+              - --rm
+              - --network
+              - none
+              - --name
+              - 'mongo-tls-preflight-{{ mongo_tls_preflight_run_id }}-mongod'
+              - --label
+              - tls.preflight=true
+              - --label
+              - tls.managed_by=ansible
+              - --tmpfs
+              - /data/db:rw,noexec,nosuid,nodev,mode=0700
+              - --tmpfs
+              - /data/configdb:rw,noexec,nosuid,nodev,mode=0700
+              - "{{ mongo_image }}"
+              - mongod
+              - --dbpath
+              - /data/db
+              - --bind_ip
+              - 127.0.0.1
+              - --port
+              - "27099"
+              - --nounixsocket
+              - --quiet
+          register: mongo_image_process_probe_container
+          changed_when: false
+
+        - name: Leer ejecutable y UID GID efectivos de mongod
+          ansible.builtin.command:
+            argv:
+              - docker
+              - exec
+              - --user
+              - "{{ mongo_image_runtime_user }}"
+              - "{{ mongo_image_process_probe_container.stdout | trim }}"
+              - /bin/sh
+              - -ec
+              - |
+                  attempts=0
+                  while [ "$attempts" -lt 30 ]; do
+                    for pid_dir in /proc/[0-9]*; do
+                      [ -d "$pid_dir" ] || continue
+                      pid="${pid_dir##*/}"
+
+                      process_path="$(readlink -f "$pid_dir/exe" 2>/dev/null || true)"
+
+                      if [ "$process_path" = "$1" ]; then
+                        process_uid="$(awk '/^Uid:/ { print $2 }' "$pid_dir/status")"
+                        process_gid="$(awk '/^Gid:/ { print $2 }' "$pid_dir/status")"
+
+                        printf '{"pid":"%s","process_path":"%s","uid":"%s","gid":"%s"}\n' \
+                          "$pid" "$process_path" "$process_uid" "$process_gid"
+
+                        exit 0
+                      fi
+                    done
+                    attempts=$((attempts + 1))
+                    sleep 1
+                  done
+                  echo 'No se encontro un proceso mongod activo dentro del tiempo esperado.' >&2
+                  exit 1
+              - --
+              - "{{ mongo_image_runtime.mongod_path }}"
+          register: mongo_image_process_probe_raw
+          changed_when: false
+
+        - name: Interpretar identidad efectiva del proceso mongod
+          ansible.builtin.set_fact:
+            mongo_image_process_probe: "{{ mongo_image_process_probe_raw.stdout | from_json }}"
+
+        - name: Validar identidad efectiva del proceso mongod
+          ansible.builtin.assert:
+            that:
+              - mongo_image_process_probe.process_path == mongo_image_runtime.mongod_path
+              - mongo_image_process_probe.uid == mongo_image_runtime.uid
+              - mongo_image_process_probe.gid == mongo_image_runtime.gid
+            fail_msg: >-
+              El entrypoint no ejecuta mongod con el UID/GID detectado para
+              {{ mongo_image_runtime_user }}.
+
+      always:
+        - name: Inspeccionar labels de sonda efimera antes de eliminar
+          ansible.builtin.command:
+            argv:
+              - docker
+              - inspect
+              - '{{ mongo_image_process_probe_container.stdout | default('''') | trim }}'
+          register: mongo_image_process_probe_cleanup_inspection
+          when:
+            - mongo_image_process_probe_container is defined
+            - mongo_image_process_probe_container.stdout | default('') | trim | length > 0
+          changed_when: false
+          failed_when: false
+
+        - name: Eliminar sonda efimera de mongod
+          ansible.builtin.command:
+            argv:
+              - docker
+              - rm
+              - -f
+              - "{{ mongo_image_process_probe_container.stdout | default('') | trim }}"
+          when:
+            - mongo_image_process_probe_container is defined
+            - mongo_image_process_probe_container.stdout | default('') | trim | length > 0
+            - mongo_image_process_probe_cleanup_inspection.rc == 0
+            - >-
+              ((mongo_image_process_probe_cleanup_inspection.stdout
+              | from_json | first).Config.Labels
+              | default({})).get('tls.preflight') == 'true'
+            - >-
+              ((mongo_image_process_probe_cleanup_inspection.stdout
+              | from_json | first).Config.Labels
+              | default({})).get('tls.managed_by') == 'ansible'
+          changed_when: false
+          failed_when: false
+
+    - name: Validar invocacion segura del entrypoint en modo de prueba
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --network
+          - none
+          - --name
+          - 'mongo-tls-preflight-{{ mongo_tls_preflight_run_id }}-entrypoint'
+          - --label
+          - tls.preflight=true
+          - --label
+          - tls.managed_by=ansible
+          - --entrypoint
+          - "{{ mongo_image_entrypoint }}"
+          - "{{ mongo_image }}"
+          - "true"
+      changed_when: false
+
+    - name: Mostrar resultado del preflight
+      ansible.builtin.debug:
+        msg:
+          image_id: "{{ mongo_image_metadata.Id }}"
+          repo_digests: "{{ mongo_image_metadata.RepoDigests | default([], true) }}"
+          runtime_user: "{{ mongo_image_runtime_user }}"
+          runtime_uid: "{{ mongo_image_runtime.uid }}"
+          runtime_gid: "{{ mongo_image_runtime.gid }}"
+          runtime_group: "{{ mongo_image_runtime.primary_group }}"
+          entrypoint: "{{ mongo_image_runtime.expected_entrypoint }}"
+          entrypoint_mode: "{{ mongo_image_runtime.entrypoint_mode }}"
+          mongod_path: "{{ mongo_image_runtime.mongod_path }}"
+          mongod_version: "{{ mongo_image_mongod_version.stdout_lines | first }}"
+          mongod_process: "{{ mongo_image_process_probe }}"
+          tmpfs_test: "{{ mongo_image_tmpfs_test }}"

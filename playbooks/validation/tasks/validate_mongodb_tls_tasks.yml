@@ -1,0 +1,179 @@
+---
+- name: Consultar especificaciones actuales de los servicios
+  ansible.builtin.command:
+    argv:
+      - docker
+      - service
+      - inspect
+      - "{{ item }}"
+  loop: "{{ mongo_tls_service_names }}"
+  register: mongo_tls_validation_services_raw
+  changed_when: false
+
+- name: Validar invariantes estructurales por servicio
+  ansible.builtin.assert:
+    that:
+      - service.Spec.Mode.Replicated.Replicas == 1
+      - service.Spec.TaskTemplate.RestartPolicy.Condition == 'any'
+      - service.Spec.TaskTemplate.RestartPolicy.MaxAttempts == 0
+      - service.Spec.EndpointSpec.Mode == 'vip'
+      - approved_digest in service.Spec.TaskTemplate.ContainerSpec.Image
+      - (service.Spec.TaskTemplate.ContainerSpec.Mounts | default([]) | selectattr('Target', 'equalto', '/run/tls-control') | list | length) == 1
+      - (service.Spec.TaskTemplate.ContainerSpec.Mounts | default([]) | selectattr('Target', 'equalto', '/data/db') | list | length) == 1
+      - "'mongo_keyfile' in secret_names"
+    fail_msg: "Invariante estructural violado en {{ item.item }}."
+  vars:
+    service: "{{ item.stdout | from_json | first }}"
+    secret_names: "{{ (service.Spec.TaskTemplate.ContainerSpec.Secrets | default([])) | map(attribute='SecretName') | list }}"
+    approved_digest: "{{ (mongo_tls_runtime_image.RepoDigests | first).split('@')[1] }}"
+  loop: "{{ mongo_tls_validation_services_raw.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Consultar topología final saludable
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../mongodb/tasks/tls_query_cluster.yml"
+
+- name: Validar miembros y prioridades finales
+  ansible.builtin.assert:
+    that:
+      - mongo_tls_cluster_status.config.members | map(attribute='host') | list | sort == ['mongo1:27017', 'mongo2:27017', 'mongo3:27017'] | sort
+      - (mongo_tls_cluster_status.config.members | selectattr('host', 'equalto', 'mongo1:27017') | first).priority == 2
+      - (mongo_tls_cluster_status.config.members | selectattr('host', 'equalto', 'mongo2:27017') | first).priority == 1
+      - (mongo_tls_cluster_status.config.members | selectattr('host', 'equalto', 'mongo3:27017') | first).priority == 1
+    fail_msg: "Miembros o prioridades del Replica Set cambiaron."
+
+- name: Validar identidad por nodo con directConnection
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../mongodb/tasks/tls_task_identity.yml"
+  loop: "{{ mongo_tls_service_names }}"
+  loop_control:
+    loop_var: mongo_tls_identity_node
+
+- name: Probar TLS y plaintext por nodo
+  ansible.builtin.include_tasks: "{{ playbook_dir }}/../mongodb/tasks/tls_validate_transport.yml"
+  loop: "{{ mongo_tls_service_names }}"
+  loop_control:
+    loop_var: mongo_tls_validation_node
+
+- name: Consultar opciones efectivas por TLS de forma segura sin password en argv
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - "{{ mongo_network }}"
+      - --mount
+      - "type=bind,source={{ mongo_tls_ca_canonical }},target=/run/tls-validation/mongo_ca.pem,readonly"
+      - --env
+      - MONGO_ADMIN_USER
+      - --env
+      - MONGO_ADMIN_PASSWORD
+      - "{{ mongo_image }}"
+      - mongosh
+      - --quiet
+      - --nodb
+      - --eval
+      - |
+          const user = process.env.MONGO_ADMIN_USER;
+          const pass = process.env.MONGO_ADMIN_PASSWORD;
+          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@{{ item }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=10000&tls=true&tlsCAFile=/run/tls-validation/mongo_ca.pem`;
+          const db = connect(uri);
+          const opts = db.adminCommand({getCmdLineOpts: 1}).parsed;
+          const params = db.adminCommand({getParameter: 1, tlsWithholdClientCertificate: 1});
+          print('TLS_OPTS_JSON=' + JSON.stringify({
+            tlsMode: opts.net?.tls?.mode,
+            tlsCertificateKeyFile: opts.net?.tls?.certificateKeyFile,
+            tlsCAFile: opts.net?.tls?.CAFile,
+            tlsAllowConnectionsWithoutCertificates: opts.net?.tls?.allowConnectionsWithoutCertificates,
+            tlsWithholdClientCertificate: params.tlsWithholdClientCertificate,
+            clusterAuthMode: opts.security?.clusterAuthMode,
+            keyFile: opts.security?.keyFile,
+            authorization: opts.security?.authorization
+          }));
+  environment:
+    MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+    MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+  loop: "{{ mongo_tls_service_names }}"
+  register: mongo_tls_effective_options_raw
+  changed_when: false
+  no_log: true
+
+- name: Interpretar opciones efectivas
+  ansible.builtin.set_fact:
+    mongo_tls_effective_options: >-
+      {{
+        mongo_tls_effective_options | default({})
+        | combine({
+          item.item:
+            ((item.stdout_lines
+              | select('match', '^TLS_OPTS_JSON=') | first
+              | regex_replace('^TLS_OPTS_JSON=', ''))
+             | from_json)
+        })
+      }}
+  loop: "{{ mongo_tls_effective_options_raw.results }}"
+  no_log: true
+
+- name: Validar opciones efectivas por nodo
+  ansible.builtin.assert:
+    that:
+      - mongo_tls_effective_options[item].tlsMode == mongo_tls_expected_mode
+      - mongo_tls_effective_options[item].tlsCertificateKeyFile == mongo_tls_runtime_certificate_key_file
+      - mongo_tls_effective_options[item].tlsCAFile == mongo_tls_runtime_ca_file
+      - mongo_tls_effective_options[item].tlsAllowConnectionsWithoutCertificates | bool
+      - mongo_tls_effective_options[item].tlsWithholdClientCertificate | bool
+      - mongo_tls_effective_options[item].clusterAuthMode == 'keyFile'
+      - mongo_tls_effective_options[item].keyFile == '/etc/mongo-keyfile'
+      - mongo_tls_effective_options[item].authorization == 'enabled'
+    fail_msg: "Opciones efectivas TLS/security incorrectas en {{ item }}."
+  loop: "{{ mongo_tls_service_names }}"
+
+- name: Reinspeccionar volúmenes para invariantes
+  ansible.builtin.command:
+    argv:
+      - docker
+      - volume
+      - inspect
+      - mongo1_data
+      - mongo2_data
+      - mongo3_data
+  register: mongo_tls_validation_volumes_raw
+  changed_when: false
+
+- name: Validar snapshot lógico cuando existe
+  ansible.builtin.assert:
+    that:
+      - mongo_tls_cluster_status.config == mongo_tls_initial_cluster_status.config
+      - (mongo_tls_validation_volumes_raw.stdout | from_json) == mongo_tls_initial_volumes
+      - (mongo_tls_validation_services_raw.results[0].stdout | from_json | first).ID == mongo_tls_initial_services.mongo1.ID
+      - (mongo_tls_validation_services_raw.results[1].stdout | from_json | first).ID == mongo_tls_initial_services.mongo2.ID
+      - (mongo_tls_validation_services_raw.results[2].stdout | from_json | first).ID == mongo_tls_initial_services.mongo3.ID
+      - (mongo_tls_validation_services_raw.results[0].stdout | from_json | first).Spec.TaskTemplate.ContainerSpec.Image == mongo_tls_initial_services.mongo1.Spec.TaskTemplate.ContainerSpec.Image
+      - (mongo_tls_validation_services_raw.results[1].stdout | from_json | first).Spec.TaskTemplate.ContainerSpec.Image == mongo_tls_initial_services.mongo2.Spec.TaskTemplate.ContainerSpec.Image
+      - (mongo_tls_validation_services_raw.results[2].stdout | from_json | first).Spec.TaskTemplate.ContainerSpec.Image == mongo_tls_initial_services.mongo3.Spec.TaskTemplate.ContainerSpec.Image
+      - (mongo_tls_validation_services_raw.results[0].stdout | from_json | first).Spec.EndpointSpec == mongo_tls_initial_services.mongo1.Spec.EndpointSpec
+      - (mongo_tls_validation_services_raw.results[1].stdout | from_json | first).Spec.EndpointSpec == mongo_tls_initial_services.mongo2.Spec.EndpointSpec
+      - (mongo_tls_validation_services_raw.results[2].stdout | from_json | first).Spec.EndpointSpec == mongo_tls_initial_services.mongo3.Spec.EndpointSpec
+      - (mongo_tls_validation_services_raw.results[0].stdout | from_json | first).Spec.Labels == mongo_tls_initial_services.mongo1.Spec.Labels
+      - (mongo_tls_validation_services_raw.results[1].stdout | from_json | first).Spec.Labels == mongo_tls_initial_services.mongo2.Spec.Labels
+      - (mongo_tls_validation_services_raw.results[2].stdout | from_json | first).Spec.Labels == mongo_tls_initial_services.mongo3.Spec.Labels
+    fail_msg: "rs.conf(), volumen, identidad, imagen, puerto o labels cambiaron."
+  when: mongo_tls_initial_services is defined
+
+- name: Mostrar validación TLS final
+  ansible.builtin.debug:
+    msg:
+      primary: "{{ mongo_tls_cluster_status.primary }}"
+      secondaries: "{{ mongo_tls_cluster_status.secondaries }}"
+      roles: "{{ mongo_tls_cluster_status.members }}"
+      priorities: >-
+        {{ mongo_tls_cluster_status.config.members
+           | map(attribute='priority') | list }}
+      tls_modes: >-
+        {{ dict(mongo_tls_service_names
+                | zip(mongo_tls_service_names
+                      | map('extract', mongo_tls_effective_options)
+                      | map(attribute='tlsMode') | list)) }}
+      tls: "OK por nodo"
+      plaintext: "OK por nodo"
+      cluster_auth_mode: "keyFile"

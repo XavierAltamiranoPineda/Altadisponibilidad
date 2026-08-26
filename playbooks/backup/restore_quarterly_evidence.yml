@@ -1,0 +1,193 @@
+---
+# ============================================================
+# REGISTRO Y EVIDENCIA DE RESTAURACION TRIMESTRAL (NON-PROD)
+# ============================================================
+# Ejecuta la prueba periodica de restauracion de MongoDB sobre
+# una base de datos temporal no destructiva y registra la
+# evidencia en la bitacora institucional:
+#   logs/mongodb_restore_evidence.log
+#
+# Caracteristicas del diseno:
+#   - Seguridad: Restringe ejecucion a ambientes no productivos
+#   - No destructivo: Restaura sobre base temporal (restore_test_database)
+#   - Integridad previa: Comprueba SHA-256 antes de mongorestore
+#   - Medicion: Calcula automaticamente duracion en segundos
+#   - Trazabilidad: Exige parametro obligatorio restore_responsible (validado)
+#   - Append-only: Registra evidencia con resultado SUCCESS o FAILED
+#
+# Uso:
+#   ansible-playbook playbooks/backup/restore_quarterly_evidence.yml \
+#     --vault-password-file secrets/vault_password \
+#     -e restore_responsible="Nombre Apellido"
+# ============================================================
+
+- name: Ejecutar prueba y registro de evidencia de restauracion trimestral
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    target_environment: "local"
+    restore_test_database: "{{ mongo_database }}_restore_test"
+
+  tasks:
+
+    # ============================================================
+    # CARGA DE VARIABLES DEL AMBIENTE
+    # ============================================================
+
+    - name: "Cargar variables del ambiente: {{ target_environment }}"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../vars/{{ target_environment }}.yml"
+
+    # ============================================================
+    # VALIDACIONES DE SEGURIDAD Y RESPONSABLE
+    # ============================================================
+
+    - name: Validar que el ambiente sea no productivo
+      ansible.builtin.assert:
+        that:
+          - target_environment != "production"
+          - environment_name != "production"
+        fail_msg: "[ERROR] La prueba trimestral de restauracion debe ejecutarse en un ambiente no productivo."
+        success_msg: "[OK] Ambiente no productivo validado: {{ environment_name }}"
+
+    - name: Validar registro y formato del responsable de la prueba trimestral
+      ansible.builtin.assert:
+        that:
+          - restore_responsible is defined
+          - restore_responsible | trim | length > 0
+          - "'|' not in restore_responsible"
+          - "'\n' not in restore_responsible"
+          - "'\r' not in restore_responsible"
+        fail_msg: >-
+          [ERROR] restore_responsible contiene caracteres no permitidos para la bitacora de evidencia.
+          Debe ser una cadena no vacia sin '|' ni saltos de linea.
+        success_msg: "[OK] Responsable registrado y validado: {{ restore_responsible }}"
+
+    # ============================================================
+    # LOCALIZAR BACKUP RECIENTE POR TIMESTAMP
+    # ============================================================
+
+    - name: Incluir tareas de seleccion de respaldo por timestamp
+      ansible.builtin.include_tasks: tasks/restore_select_backup_tasks.yml
+
+    # ============================================================
+    # PREPARACION DE DIRECTORIOS Y CRONOMETRAJE
+    # ============================================================
+
+    - name: Garantizar directorio de bitacoras
+      ansible.builtin.file:
+        path: "{{ backup_log_root }}"
+        state: directory
+        mode: "0700"
+
+    - name: Registrar timestamp de inicio de la restauracion
+      ansible.builtin.command:
+        cmd: date +%s
+      register: restore_start_epoch
+      changed_when: false
+
+    - name: Obtener timestamp ISO de inicio
+      ansible.builtin.command:
+        cmd: date --iso-8601=seconds
+      register: restore_start_iso
+      changed_when: false
+
+    - name: Inicializar estados de ejecucion y checksum
+      ansible.builtin.set_fact:
+        restore_checksum_status: "PENDING"
+        restore_final_status: "FAILED"
+
+    # ============================================================
+    # EJECUCION CONTROLADA DE RESTAURACION Y REGISTRO DE EVIDENCIA
+    # ============================================================
+
+    - name: Ejecutar ciclo de restauracion con captura de estado
+      block:
+
+        - name: Validar checksum SHA-256 antes de restaurar
+          ansible.builtin.shell: |
+            cd "$(dirname "{{ backup_file_path }}")"
+            sha256sum -c "$(basename "{{ checksum_file_path }}")"
+          register: checksum_validation
+          changed_when: false
+          failed_when: false
+
+        - name: Actualizar estado de validacion de checksum
+          ansible.builtin.set_fact:
+            restore_checksum_status: "{{ 'OK' if (checksum_validation.rc == 0) else 'FAILED' }}"
+
+        - name: Confirmar integridad SHA-256 previa
+          ansible.builtin.assert:
+            that:
+              - checksum_validation.rc == 0
+            fail_msg: "[ERROR] El backup no supera la validacion SHA-256. Restauracion abortada."
+            success_msg: "[OK] Integridad SHA-256 validada antes del restore"
+
+        - name: Incluir tareas de restauracion comunes
+          ansible.builtin.include_tasks: tasks/restore_test_tasks.yml
+
+        - name: Marcar resultado de restauracion como exitoso
+          ansible.builtin.set_fact:
+            restore_final_status: "SUCCESS"
+
+      rescue:
+        - name: Marcar resultado de restauracion como fallido
+          ansible.builtin.set_fact:
+            restore_final_status: "FAILED"
+            restore_checksum_status: "{{ 'FAILED' if (checksum_validation is defined and checksum_validation.rc != 0) else restore_checksum_status }}"
+
+        - name: Detener ejecucion por fallo en restauracion
+          ansible.builtin.fail:
+            msg: "[ERROR] La prueba de restauracion fallo durante su ejecucion."
+
+      always:
+        - name: Registrar timestamp de fin y calcular duracion
+          ansible.builtin.command:
+            cmd: date +%s
+          register: restore_end_epoch
+          changed_when: false
+
+        - name: Calcular duracion en segundos
+          ansible.builtin.set_fact:
+            restore_duration_seconds: "{{ (restore_end_epoch.stdout | int) - (restore_start_epoch.stdout | int) }}"
+
+        - name: Registrar evidencia trimestral en bitacora
+          ansible.builtin.lineinfile:
+            path: "{{ backup_log_root }}/{{ restore_evidence_log_filename }}"
+            create: true
+            mode: "0600"
+            insertafter: EOF
+            line: >-
+              {{ restore_start_iso.stdout }}
+              | environment={{ environment_name }}
+              | source_database={{ mongo_database }}
+              | restore_database={{ restore_test_database }}
+              | backup_file={{ backup_filename }}
+              | checksum={{ restore_checksum_status }}
+              | duration_seconds={{ restore_duration_seconds }}
+              | responsible={{ restore_responsible }}
+              | result={{ restore_final_status }}
+
+        - name: Mostrar resumen de evidencia trimestral
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "EVIDENCIA DE RESTAURACION TRIMESTRAL REGISTRADA"
+              - "============================================================"
+              - "Fecha/Hora: {{ restore_start_iso.stdout }}"
+              - "Ambiente: {{ environment_name }}"
+              - "Base origen: {{ mongo_database }}"
+              - "Base restaurada: {{ restore_test_database }}"
+              - "Backup utilizado: {{ backup_filename }}"
+              - "Checksum previo: {{ restore_checksum_status }}"
+              - "Duracion: {{ restore_duration_seconds }} segundos"
+              - "Responsable: {{ restore_responsible }}"
+              - "Resultado: {{ restore_final_status }}"
+              - "Log de evidencia: {{ backup_log_root }}/{{ restore_evidence_log_filename }}"
+              - "============================================================"

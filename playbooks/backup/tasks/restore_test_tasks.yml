@@ -1,0 +1,226 @@
+---
+# ============================================================
+# TAREAS DE RESTAURACION Y VALIDACION REUTILIZABLES
+# ============================================================
+
+- name: Buscar un nodo MongoDB activo para trazabilidad y deteccion de PRIMARY
+  ansible.builtin.shell: |
+    for service in {{ mongo_trace_services | map('quote') | join(' ') }}; do
+      container=$(docker ps \
+        --filter "label=com.docker.swarm.service.name=${service}" \
+        --format '{{"{{"}}.ID{{"}}"}}' | head -n1)
+
+      if [ -n "$container" ]; then
+        echo "$container"
+        exit 0
+      fi
+    done
+    exit 1
+  register: mongo_available_container
+  changed_when: false
+
+- name: Detectar PRIMARY actual del Replica Set
+  ansible.builtin.shell: |
+    docker exec \
+      -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+      -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+      {{ mongo_available_container.stdout }} \
+      sh -c '
+        mongosh \
+          --quiet \
+          --host 127.0.0.1 \
+          --port 27017 \
+          --username "$MONGO_ADMIN_USER" \
+          --password "$MONGO_ADMIN_PASSWORD" \
+          --authenticationDatabase admin \
+          --eval "db.hello().primary"
+      '
+  register: mongo_primary_raw
+  changed_when: false
+  no_log: true
+
+- name: Validar deteccion de PRIMARY
+  ansible.builtin.assert:
+    that:
+      - mongo_primary_raw.stdout | length > 0
+      - "':' in mongo_primary_raw.stdout"
+    fail_msg: "[ERROR] No se pudo detectar un PRIMARY activo en el Replica Set"
+    success_msg: "[OK] PRIMARY detectado: {{ mongo_primary_raw.stdout | trim }}"
+
+- name: Extraer nombre de servicio PRIMARY
+  ansible.builtin.set_fact:
+    mongo_primary_service: "{{ mongo_primary_raw.stdout.split(':')[0] | trim }}"
+
+- name: Obtener ID del contenedor correspondiente al PRIMARY
+  ansible.builtin.shell: |
+    container=$(docker ps \
+      --filter "label=com.docker.swarm.service.name={{ mongo_primary_service }}" \
+      --format '{{"{{"}}.ID{{"}}"}}' | head -n1)
+    if [ -n "$container" ]; then
+      echo "$container"
+      exit 0
+    fi
+    exit 1
+  register: mongo_primary_container
+  changed_when: false
+
+- name: Validar existencia de contenedor PRIMARY
+  ansible.builtin.assert:
+    that:
+      - mongo_primary_container.stdout | length > 0
+    fail_msg: "[ERROR] No se encontro el contenedor Docker asociado al servicio PRIMARY ({{ mongo_primary_service }})"
+    success_msg: "[OK] Contenedor PRIMARY activo identificado: {{ mongo_primary_container.stdout }}"
+
+- name: Validar version aprobada de Database Tools en la imagen Docker
+  ansible.builtin.command:
+    cmd: "docker run --rm {{ mongo_backup_tools_image }} mongorestore --version"
+  register: mongorestore_version
+  changed_when: false
+
+- name: Validar version 100.18.0 de mongorestore
+  ansible.builtin.assert:
+    that:
+      - "'mongorestore version: ' ~ mongodb_tools_version in mongorestore_version.stdout"
+    fail_msg: "[ERROR] Version incorrecta de mongorestore en imagen {{ mongo_backup_tools_image }}. Esperada: {{ mongodb_tools_version }}"
+    success_msg: "[OK] mongorestore {{ mongodb_tools_version }} validado en imagen {{ mongo_backup_tools_image }}"
+
+- name: Eliminar base temporal previa en el PRIMARY si existe
+  ansible.builtin.shell: |
+    docker exec \
+      -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+      -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+      {{ mongo_primary_container.stdout }} \
+      sh -c '
+        mongosh \
+          --quiet \
+          --host 127.0.0.1 \
+          --port 27017 \
+          --username "$MONGO_ADMIN_USER" \
+          --password "$MONGO_ADMIN_PASSWORD" \
+          --authenticationDatabase admin \
+          --eval "db.getSiblingDB(\"{{ restore_test_database }}\").dropDatabase()"
+      '
+  changed_when: true
+  no_log: true
+
+- name: Generar identificador unico para runner de restore
+  ansible.builtin.shell: |
+    date +%Y%m%d_%H%M%S
+  register: restore_runner_timestamp
+  changed_when: false
+
+- name: Definir nombre del contenedor runner de restore
+  ansible.builtin.set_fact:
+    restore_runner_name: "mongo_restore_runner_{{ restore_runner_timestamp.stdout | trim }}"
+
+- name: Ejecutar mongorestore con contenedor temporal HA y garantia de limpieza
+  block:
+    - name: Restaurar respaldo en base temporal via red overlay HA
+      ansible.builtin.command:
+        argv:
+          - docker
+          - run
+          - --rm
+          - --name
+          - "{{ restore_runner_name }}"
+          - --network
+          - "{{ mongo_backup_network }}"
+          - -v
+          - "{{ backup_file_path | dirname }}:/backup:ro"
+          - "{{ mongo_backup_tools_image }}"
+          - mongorestore
+          - "--uri={{ mongo_backup_uri }}"
+          - --username
+          - "{{ mongo_restore_user }}"
+          - --password
+          - "{{ mongo_restore_password }}"
+          - --authenticationDatabase
+          - admin
+          - --gzip
+          - "--archive=/backup/{{ backup_filename }}"
+          - --nsFrom
+          - "{{ mongo_database }}.*"
+          - --nsTo
+          - "{{ restore_test_database }}.*"
+      register: restore_result
+      changed_when: true
+      no_log: true
+
+  always:
+    - name: Limpiar y eliminar contenedor runner de restore si aun existe
+      ansible.builtin.command:
+        cmd: "docker rm -f {{ restore_runner_name }}"
+      register: restore_container_cleanup
+      changed_when: false
+      failed_when: false
+      no_log: true
+
+# ============================================================
+# VALIDACION FUNCIONAL POR CONTEO DE DOCUMENTOS
+# ============================================================
+# Esta es una validacion funcional basica por conteo de documentos.
+# No representa una comprobacion criptografica de igualdad completa.
+
+- name: Obtener cantidad de documentos en base original desde PRIMARY
+  ansible.builtin.shell: |
+    docker exec \
+      -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+      -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+      {{ mongo_primary_container.stdout }} \
+      sh -c '
+        mongosh \
+          --quiet \
+          --host 127.0.0.1 \
+          --port 27017 \
+          --username "$MONGO_ADMIN_USER" \
+          --password "$MONGO_ADMIN_PASSWORD" \
+          --authenticationDatabase admin \
+          --eval "
+            const targetDB = db.getSiblingDB(\"{{ mongo_database }}\");
+            let total = 0;
+            targetDB.getCollectionNames().forEach(c => {
+              total += targetDB.getCollection(c).countDocuments({});
+            });
+            print(total);
+          "
+      '
+  register: original_documents
+  changed_when: false
+  no_log: true
+
+- name: Obtener cantidad de documentos en base restaurada desde PRIMARY
+  ansible.builtin.shell: |
+    docker exec \
+      -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+      -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+      {{ mongo_primary_container.stdout }} \
+      sh -c '
+        mongosh \
+          --quiet \
+          --host 127.0.0.1 \
+          --port 27017 \
+          --username "$MONGO_ADMIN_USER" \
+          --password "$MONGO_ADMIN_PASSWORD" \
+          --authenticationDatabase admin \
+          --eval "
+            const targetDB = db.getSiblingDB(\"{{ restore_test_database }}\");
+            let total = 0;
+            targetDB.getCollectionNames().forEach(c => {
+              total += targetDB.getCollection(c).countDocuments({});
+            });
+            print(total);
+          "
+      '
+  register: restored_documents
+  changed_when: false
+  no_log: true
+
+- name: Validar coincidencia de documentos restaurados
+  ansible.builtin.assert:
+    that:
+      - original_documents.stdout | int == restored_documents.stdout | int
+    fail_msg: >-
+      [ERROR] La cantidad de documentos restaurados no coincide.
+      Original={{ original_documents.stdout }}
+      Restaurada={{ restored_documents.stdout }}
+    success_msg: "[OK] Validacion de restauracion exitosa (Documentos: {{ original_documents.stdout }})"

@@ -1,0 +1,34 @@
+# Ansible Vault and Secrets
+vars/vault_mongodb.yml
+secrets/mongo-keyfile
+secrets/vault_password
+secrets/
+.vault_pass
+
+# Ansible retry files
+*.retry
+
+# Python byte code
+__pycache__/
+*.pyc
+*.pyo
+
+# OS and Editor metadata
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# Agents
+agents/*
+.agents/*
+
+# Runtime logs / TLS rollout state
+logs/*.lock
+logs/tls_rollout_state.json
+logs/tls_update_spec_*.json
+
+# Documentation and media
+PAS-EST-XXX_Implementacion_Respaldos_MongoDB-v2.md
+docs/PAS-EST-XXX_Implementacion_Respaldos_MongoDB-v2_media/
+skills-lock.json

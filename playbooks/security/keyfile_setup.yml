@@ -1,0 +1,73 @@
+---
+- name: Preparar seguridad MongoDB para Docker Swarm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    mongo_keyfile: "{{ playbook_dir }}/../../secrets/mongo-keyfile"
+
+  tasks:
+
+    # ==========================================================
+    # 1. ENCABEZADO
+    # ==========================================================
+
+    - name: Mostrar encabezado
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "        SEGURIDAD MONGODB - V2"
+          - "============================================================"
+          - ""
+          - "Preparando keyfile para Replica Set..."
+          - ""
+
+    # ==========================================================
+    # 2. GENERAR KEYFILE
+    # ==========================================================
+
+    - name: Generar keyfile MongoDB
+      ansible.builtin.command:
+        cmd: >
+          openssl rand -base64 756
+      register: generated_key
+      changed_when: true
+      no_log: true
+
+    # ==========================================================
+    # 3. GUARDAR KEYFILE
+    # ==========================================================
+
+    - name: Guardar keyfile
+      ansible.builtin.copy:
+        content: "{{ generated_key.stdout }}"
+        dest: "{{ mongo_keyfile }}"
+        mode: "0600"
+      no_log: true
+
+    # ==========================================================
+    # 4. VERIFICAR KEYFILE
+    # ==========================================================
+
+    - name: Verificar permisos del keyfile
+      ansible.builtin.stat:
+        path: "{{ mongo_keyfile }}"
+      register: keyfile_info
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "        RESULTADO SEGURIDAD MONGODB"
+          - "============================================================"
+          - ""
+          - "[OK] Keyfile generado"
+          - "[OK] Keyfile protegido"
+          - "Permisos: {{ keyfile_info.stat.mode }}"
+          - ""
+          - "Ubicación:"
+          - "{{ mongo_keyfile }}"
+          - ""
+          - "============================================================"

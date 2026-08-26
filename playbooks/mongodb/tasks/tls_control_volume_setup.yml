@@ -1,0 +1,142 @@
+---
+# ============================================================
+# Creacion de volumenes de control y escritura atomica de operation-active
+# ============================================================
+
+- name: Construir argv base para docker volume create
+  ansible.builtin.set_fact:
+    mongo_tls_vol_base_argv:
+      - docker
+      - volume
+      - create
+      - --driver
+      - "{{ mongo_tls_control_volume_driver | default('local') }}"
+
+# Acumula ['--opt', 'key=value'] por cada entrada de driver_opts.
+# Con driver_opts: {} (default local) el loop no ejecuta ninguna iteracion
+# y mongo_tls_vol_base_argv queda intacto. Con driver_opts no vacio
+# (ej. NFS: type, o, device) cada par llega exactamente como argumento
+# posicional sin interpretacion de shell, lo que protege valores con
+# caracteres especiales como addr=10.0.0.10,rw,nfsvers=4.
+- name: Acumular opciones --opt en argv de creacion de volumen
+  ansible.builtin.set_fact:
+    mongo_tls_vol_base_argv: >-
+      {{ mongo_tls_vol_base_argv + ['--opt', item.key ~ '=' ~ item.value] }}
+  loop: "{{ mongo_tls_control_volume_driver_opts | default({}) | dict2items }}"
+  loop_control:
+    label: "{{ item.key }}"
+
+- name: Crear volumenes de control idempotentemente
+  ansible.builtin.command:
+    argv: "{{ mongo_tls_vol_base_argv + [mongo_tls_control_volume_names[item]] }}"
+  loop: "{{ mongo_tls_service_names }}"
+  register: mongo_tls_vol_create_raw
+  changed_when: false  # docker volume create es idempotente; con loop .stdout no existe en el registro raiz
+  failed_when: mongo_tls_vol_create_raw.rc != 0
+
+# mongo_tls_precheck_decision llega pre-calculado desde tls_rollout.yml.
+# La evaluacion del state anterior (incluyendo ABORTED_PRE_MUTATION) se
+# ejecuto alli: antes de generar nuevo rollout_id y antes de crear volumes.
+# Aqui solo verificamos flags de seguridad en los volumes ya creados.
+
+- name: Inspeccionar flags en control volumes (verificacion de seguridad post-create)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ mongo_tls_control_volume_names[item] }}:/ctrl:ro"
+      - "{{ mongo_image }}"
+      - sh
+      - -c
+      - |
+        FLAGS=""
+        [ -f /ctrl/operation-active ] && FLAGS="${FLAGS}operation-active "
+        [ -f /ctrl/operation-start ]  && FLAGS="${FLAGS}operation-start "
+        [ -f /ctrl/.operation-active.tmp ] && FLAGS="${FLAGS}.operation-active.tmp "
+        [ -z "$FLAGS" ] && echo "CLEAN" || echo "FLAGS:${FLAGS}"
+  loop: "{{ mongo_tls_service_names }}"
+  register: mongo_tls_volume_flags_raw
+  changed_when: false
+
+- name: Evaluar presencia de flags en volumenes
+  ansible.builtin.set_fact:
+    mongo_tls_any_flags_exist: >-
+      {{
+        mongo_tls_volume_flags_raw.results
+        | map(attribute='stdout') | select('search', 'FLAGS') | list | length > 0
+      }}
+
+- name: Safety guard — flags inesperadas en modo CONTINUE
+  # En CONTINUE el precheck de tls_rollout.yml ya verifico que no habia mutaciones.
+  # Flags aqui indican una inconsistencia inesperada que debe bloquear el rollout.
+  ansible.builtin.fail:
+    msg: >
+      SETUP ABORT: Flags inesperadas en control volumes en modo CONTINUE.
+      Esto no deberia ocurrir si tls_rollout.yml funciono correctamente.
+      Flags: {{ mongo_tls_volume_flags_raw.results | map(attribute='stdout') | list }}.
+      Revisar state file y usar force_recovery=true si es necesario.
+  when:
+    - mongo_tls_precheck_decision == 'CONTINUE'
+    - mongo_tls_any_flags_exist | bool
+
+- name: Limpiar flags residuales de rollout previo exitoso
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ mongo_tls_control_volume_names[item] }}:/ctrl:rw"
+      - "{{ mongo_image }}"
+      - sh
+      - -c
+      - "rm -f /ctrl/operation-active /ctrl/operation-start /ctrl/.operation-active.tmp && echo CLEANED"
+  loop: "{{ mongo_tls_service_names }}"
+  when: mongo_tls_precheck_decision == 'CLEANUP_AND_CONTINUE'
+  register: mongo_tls_precheck_clean_raw
+  changed_when: "'CLEANED' in mongo_tls_precheck_clean_raw.stdout"
+
+- name: Escribir operation-active atomicamente en los 3 volumenes (mode=forward)
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ mongo_tls_control_volume_names[item] }}:/ctrl:rw"
+      - "{{ mongo_image }}"
+      - sh
+      - -c
+      - |
+        printf 'operation_id=%s\nmode=forward\ndeadline=%s\nnode=%s\nsource=%s\ntarget=allowTLS\ncreated_at=%s\n' \
+          "{{ mongo_tls_operation_id }}" \
+          "{{ mongo_tls_operation_deadline }}" \
+          "{{ item }}" \
+          "{{ mongo_tls_source_mode | default('disabled') }}" \
+          "{{ ansible_date_time.iso8601 }}" > /ctrl/.operation-active.tmp
+        chmod 0644 /ctrl/.operation-active.tmp
+        rm -f /ctrl/operation-start
+        mv -f /ctrl/.operation-active.tmp /ctrl/operation-active
+        echo "WRITTEN_FORWARD node={{ item }}"
+  loop: "{{ mongo_tls_service_names }}"
+  register: mongo_tls_write_forward_raw
+  changed_when: "'WRITTEN_FORWARD' in mongo_tls_write_forward_raw.stdout"
+
+- name: Verificar que operation-active existe y operation-start esta ausente
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ mongo_tls_control_volume_names[item] }}:/ctrl:ro"
+      - "{{ mongo_image }}"
+      - sh
+      - -c
+      - |
+        test -f /ctrl/operation-active && test ! -f /ctrl/operation-start && echo "VERIFIED_GATE_SET" || exit 1
+  loop: "{{ mongo_tls_service_names }}"
+  register: mongo_tls_verify_forward_raw
+  changed_when: false

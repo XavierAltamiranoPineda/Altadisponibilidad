@@ -1,0 +1,209 @@
+services:
+
+  svc-mongo-auditoria-1:
+    image: mongo:7-jammy
+
+    container_name: ctn-mongo-auditoria-1
+
+    hostname: mongo1
+
+    restart: unless-stopped
+
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo_user
+      MONGO_INITDB_ROOT_PASSWORD: mongo_password
+      MONGO_INITDB_DATABASE: auditoria_iess_db
+
+    ports:
+      - "27017:27017"
+
+    volumes:
+      - mongo_data_1:/data/db
+      - ./mongo-keyfile:/etc/mongo-keyfile
+
+    command:
+      - sh
+      - -c
+      - chmod 400 /etc/mongo-keyfile && mongod --replSet rs0 --auth --bind_ip_all --keyFile /etc/mongo-keyfile --quiet
+
+    networks:
+      - net-iess
+
+    labels:
+      iess.type: plataforma
+      iess.project: auditoria
+      iess.business: DNTI
+      iess.domain: transversal
+      iess.version: "7"
+      iess.environment: dev
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--eval",
+          "db.adminCommand('ping')"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  svc-mongo-auditoria-2:
+    image: mongo:7-jammy
+
+    container_name: ctn-mongo-auditoria-2
+
+    hostname: mongo2
+
+    restart: unless-stopped
+
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo_user
+      MONGO_INITDB_ROOT_PASSWORD: mongo_password
+      MONGO_INITDB_DATABASE: auditoria_iess_db
+
+    ports:
+      - "27018:27017"
+
+    volumes:
+      - mongo_data_2:/data/db
+      - ./mongo-keyfile:/etc/mongo-keyfile
+
+    command:
+      - sh
+      - -c
+      - chmod 400 /etc/mongo-keyfile && mongod --replSet rs0 --auth --bind_ip_all --keyFile /etc/mongo-keyfile --quiet
+
+    networks:
+      - net-iess
+
+    labels:
+      iess.type: plataforma
+      iess.project: auditoria
+      iess.business: DNTI
+      iess.domain: transversal
+      iess.version: "7"
+      iess.environment: dev
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--eval",
+          "db.adminCommand('ping')"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  svc-mongo-auditoria-3:
+    image: mongo:7-jammy
+
+    container_name: ctn-mongo-auditoria-3
+
+    hostname: mongo3
+
+    restart: unless-stopped
+
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo_user
+      MONGO_INITDB_ROOT_PASSWORD: mongo_password
+      MONGO_INITDB_DATABASE: auditoria_iess_db
+
+    ports:
+      - "27019:27017"
+
+    volumes:
+      - mongo_data_3:/data/db
+      - ./mongo-keyfile:/etc/mongo-keyfile
+
+    command:
+      - sh
+      - -c
+      - chmod 400 /etc/mongo-keyfile && mongod --replSet rs0 --auth --bind_ip_all --keyFile /etc/mongo-keyfile --quiet
+
+    networks:
+      - net-iess
+
+    labels:
+      iess.type: plataforma
+      iess.project: auditoria
+      iess.business: DNTI
+      iess.domain: transversal
+      iess.version: "7"
+      iess.environment: dev
+
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "mongosh",
+          "--eval",
+          "db.adminCommand('ping')"
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+
+  svc-mongo-init:
+    image: mongo:7-jammy
+
+    container_name: ctn-mongo-init
+
+    restart: "no"
+
+    depends_on:
+      svc-mongo-auditoria-1:
+        condition: service_healthy
+      svc-mongo-auditoria-2:
+        condition: service_healthy
+      svc-mongo-auditoria-3:
+        condition: service_healthy
+
+    environment:
+      MONGO_INITDB_ROOT_USERNAME: mongo_user
+      MONGO_INITDB_ROOT_PASSWORD: mongo_password
+      MONGO_INITDB_DATABASE: auditoria_iess_db
+
+    volumes:
+      - ./init-rs.js:/scripts/init-rs.js:ro
+
+    entrypoint:
+      - mongosh
+      - --host
+      - mongo1:27017
+      - -u
+      - mongo_user
+      - -p
+      - mongo_password
+      - --authenticationDatabase
+      - admin
+      - --file
+      - /scripts/init-rs.js
+
+    networks:
+      - net-iess
+
+    labels:
+      iess.type: plataforma
+      iess.project: auditoria
+      iess.business: DNTI
+      iess.domain: transversal
+      iess.version: "7"
+      iess.environment: dev
+
+
+volumes:
+  mongo_data_1:
+  mongo_data_2:
+  mongo_data_3:
+
+
+networks:
+  net-iess:
+    driver: bridge

@@ -1,0 +1,417 @@
+---
+- name: Generar PKI TLS local para MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+
+  vars:
+    target_environment: "local"
+    local_mongo_tls_ca_csr_path: "{{ local_mongo_tls_pki_root }}/ca/mongo_local_root_ca.csr"
+    mongo_tls_min_validity_seconds: "{{ (mongo_tls_min_validity_days | int) * 86400 }}"
+    mongo_tls_local_nodes:
+      - name: "mongo1"
+        common_name: "mongo1"
+        directory: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo1"
+        private_key_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo1/mongo1.key"
+        csr_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo1/mongo1.csr"
+        certificate_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo1/mongo1.crt"
+        pem_path: "{{ mongo_tls_nodes_certificates.mongo1.pem_path }}"
+        subject_alt_name:
+          - "DNS:mongo1"
+          - "DNS:localhost"
+          - "IP:127.0.0.1"
+      - name: "mongo2"
+        common_name: "mongo2"
+        directory: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo2"
+        private_key_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo2/mongo2.key"
+        csr_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo2/mongo2.csr"
+        certificate_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo2/mongo2.crt"
+        pem_path: "{{ mongo_tls_nodes_certificates.mongo2.pem_path }}"
+        subject_alt_name:
+          - "DNS:mongo2"
+          - "DNS:localhost"
+          - "IP:127.0.0.1"
+      - name: "mongo3"
+        common_name: "mongo3"
+        directory: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo3"
+        private_key_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo3/mongo3.key"
+        csr_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo3/mongo3.csr"
+        certificate_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo3/mongo3.crt"
+        pem_path: "{{ mongo_tls_nodes_certificates.mongo3.pem_path }}"
+        subject_alt_name:
+          - "DNS:mongo3"
+          - "DNS:localhost"
+          - "IP:127.0.0.1"
+
+  tasks:
+    - name: Validar alcance local y estado TLS deshabilitado
+      ansible.builtin.assert:
+        that:
+          - target_environment == 'local'
+          - environment_name == 'local'
+          - mongo_tls_provisioning_source == 'ansible_local_ca'
+          - not (mongo_tls_enabled | bool)
+          - not (mongo_tls_clients_enabled | bool)
+          - mongo_tls_deployment_mode == 'disabled'
+          - mongo_tls_target_mode == 'requireTLS'
+          - mongo_tls_node_names | sort == (mongo_tls_local_nodes | map(attribute='name') | list | sort)
+        fail_msg: "La PKI local solo puede gestionarse con TLS deshabilitado en LOCAL."
+
+    - name: Validar disponibilidad de OpenSSL
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - version
+      register: local_openssl_version
+      changed_when: false
+
+    - name: Crear estructura privada de la PKI local
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: directory
+        mode: "0700"
+      loop: >-
+        {{ [
+             local_mongo_tls_pki_root,
+             local_mongo_tls_pki_root ~ '/ca',
+             local_mongo_tls_pki_root ~ '/' ~ mongo_tls_ca_secret_version,
+             local_mongo_tls_pki_root ~ '/' ~ mongo_tls_node_secret_version
+           ] + (mongo_tls_local_nodes | map(attribute='directory') | list) }}
+
+    - name: Consultar estado de la clave privada de la Root CA
+      ansible.builtin.stat:
+        path: "{{ local_mongo_tls_ca_private_key_path }}"
+      register: local_ca_key_stat
+
+    - name: Consultar estado del certificado de la Root CA
+      ansible.builtin.stat:
+        path: "{{ mongo_tls_ca_cert_path }}"
+      register: local_ca_cert_stat
+
+    - name: Impedir regenerar una Root CA sin su clave original
+      ansible.builtin.assert:
+        that:
+          - not local_ca_cert_stat.stat.exists or local_ca_key_stat.stat.exists
+        fail_msg: >-
+          Existe el certificado Root CA pero falta su clave privada. Se requiere
+          una rotacion explicita; no se generara una clave nueva automaticamente.
+
+    - name: Validar vigencia minima de una Root CA existente
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -checkend
+          - "{{ mongo_tls_min_validity_seconds | string }}"
+          - -noout
+          - -in
+          - "{{ mongo_tls_ca_cert_path }}"
+      when: local_ca_cert_stat.stat.exists
+      changed_when: false
+
+    - name: Obtener clave publica de la Root CA privada existente
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - pkey
+          - -in
+          - "{{ local_mongo_tls_ca_private_key_path }}"
+          - -pubout
+      when: local_ca_cert_stat.stat.exists
+      register: local_ca_private_public_key
+      changed_when: false
+      no_log: true
+
+    - name: Obtener clave publica del certificado Root CA existente
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ mongo_tls_ca_cert_path }}"
+          - -pubkey
+          - -noout
+      when: local_ca_cert_stat.stat.exists
+      register: local_ca_certificate_public_key
+      changed_when: false
+      no_log: true
+
+    - name: Validar correspondencia de clave y certificado Root CA existentes
+      ansible.builtin.assert:
+        that:
+          - local_ca_private_public_key.stdout == local_ca_certificate_public_key.stdout
+        fail_msg: "La clave privada existente no corresponde al certificado Root CA."
+      when: local_ca_cert_stat.stat.exists
+      no_log: true
+
+    - name: Generar clave privada de la Root CA cuando falta
+      community.crypto.openssl_privatekey:
+        path: "{{ local_mongo_tls_ca_private_key_path }}"
+        type: "RSA"
+        size: 3072
+        mode: "0600"
+      when: not local_ca_key_stat.stat.exists
+      no_log: true
+
+    - name: Generar CSR de la Root CA
+      community.crypto.openssl_csr:
+        path: "{{ local_mongo_tls_ca_csr_path }}"
+        privatekey_path: "{{ local_mongo_tls_ca_private_key_path }}"
+        common_name: "MongoDB Local Root CA"
+        organization_name: "MongoDB Local Lab"
+        organizational_unit_name: "Local Root CA"
+        basic_constraints:
+          - "CA:TRUE"
+        basic_constraints_critical: true
+        key_usage:
+          - "keyCertSign"
+          - "cRLSign"
+        key_usage_critical: true
+        use_common_name_for_san: false
+        mode: "0600"
+      no_log: true
+
+    - name: Generar certificado autoemitido de la Root CA cuando falta
+      community.crypto.x509_certificate:
+        path: "{{ mongo_tls_ca_cert_path }}"
+        csr_path: "{{ local_mongo_tls_ca_csr_path }}"
+        privatekey_path: "{{ local_mongo_tls_ca_private_key_path }}"
+        provider: "selfsigned"
+        selfsigned_digest: "sha256"
+        selfsigned_not_before: "+0s"
+        selfsigned_not_after: "+{{ mongo_tls_local_ca_validity_days }}d"
+        mode: "0644"
+      when: not local_ca_cert_stat.stat.exists
+      no_log: true
+
+    - name: Consultar claves privadas de nodo
+      ansible.builtin.stat:
+        path: "{{ item.private_key_path }}"
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: local_node_key_stats
+
+    - name: Consultar certificados de nodo
+      ansible.builtin.stat:
+        path: "{{ item.certificate_path }}"
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: local_node_cert_stats
+
+    - name: Consultar PEM combinados de nodo
+      ansible.builtin.stat:
+        path: "{{ item.pem_path }}"
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      register: local_node_pem_stats
+
+    - name: Impedir regenerar claves de certificados existentes
+      ansible.builtin.assert:
+        that:
+          - not item.stat.exists or local_node_key_stats.results[node_index].stat.exists
+        fail_msg: >-
+          Existe el certificado de {{ item.item.name }} pero falta su clave
+          privada. Se requiere rotacion explicita.
+      loop: "{{ local_node_cert_stats.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+        index_var: node_index
+
+    - name: Validar vigencia minima de certificados existentes
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -checkend
+          - "{{ mongo_tls_min_validity_seconds | string }}"
+          - -noout
+          - -in
+          - "{{ item.certificate_path }}"
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+        index_var: node_index
+      when: local_node_cert_stats.results[node_index].stat.exists
+      changed_when: false
+
+    - name: Validar cadena de certificados existentes
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - verify
+          - -CAfile
+          - "{{ mongo_tls_ca_cert_path }}"
+          - "{{ item.certificate_path }}"
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+        index_var: node_index
+      when: local_node_cert_stats.results[node_index].stat.exists
+      changed_when: false
+
+    - name: Obtener claves publicas de claves privadas existentes
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - pkey
+          - -in
+          - "{{ item.private_key_path }}"
+          - -pubout
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+        index_var: node_index
+      when: local_node_cert_stats.results[node_index].stat.exists
+      register: local_node_private_public_keys
+      changed_when: false
+      no_log: true
+
+    - name: Obtener claves publicas de certificados existentes
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -in
+          - "{{ item.certificate_path }}"
+          - -pubkey
+          - -noout
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+        index_var: node_index
+      when: local_node_cert_stats.results[node_index].stat.exists
+      register: local_node_certificate_public_keys
+      changed_when: false
+      no_log: true
+
+    - name: Validar correspondencia de claves y certificados existentes
+      ansible.builtin.assert:
+        that:
+          - item.stdout == local_node_certificate_public_keys.results[node_index].stdout
+        fail_msg: "La clave privada no corresponde al certificado de {{ item.item.name }}."
+      loop: "{{ local_node_private_public_keys.results }}"
+      loop_control:
+        label: "{{ item.item.name }}"
+        index_var: node_index
+      when: not (item.skipped | default(false))
+      no_log: true
+
+    - name: Generar claves privadas de nodo faltantes
+      community.crypto.openssl_privatekey:
+        path: "{{ item.private_key_path }}"
+        type: "RSA"
+        size: 3072
+        mode: "0600"
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+        index_var: node_index
+      when: not local_node_key_stats.results[node_index].stat.exists
+      no_log: true
+
+    - name: Generar CSR de los nodos
+      community.crypto.openssl_csr:
+        path: "{{ item.csr_path }}"
+        privatekey_path: "{{ item.private_key_path }}"
+        common_name: "{{ item.common_name }}"
+        organization_name: "MongoDB Local Lab"
+        organizational_unit_name: "rs0 TLS"
+        subject_alt_name: "{{ item.subject_alt_name }}"
+        basic_constraints:
+          - "CA:FALSE"
+        basic_constraints_critical: true
+        key_usage: "{{ mongo_tls_node_key_usage }}"
+        key_usage_critical: true
+        extended_key_usage: "{{ mongo_tls_node_extended_key_usage }}"
+        use_common_name_for_san: false
+        mode: "0600"
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      no_log: true
+
+    - name: Firmar certificados de nodo faltantes con la Root CA
+      community.crypto.x509_certificate:
+        path: "{{ item.certificate_path }}"
+        csr_path: "{{ item.csr_path }}"
+        provider: "ownca"
+        ownca_path: "{{ mongo_tls_ca_cert_path }}"
+        ownca_privatekey_path: "{{ local_mongo_tls_ca_private_key_path }}"
+        ownca_digest: "sha256"
+        ownca_not_before: "+0s"
+        ownca_not_after: "+{{ mongo_tls_local_cert_validity_days }}d"
+        mode: "0644"
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+        index_var: node_index
+      when: not local_node_cert_stats.results[node_index].stat.exists
+      no_log: true
+
+    - name: Crear PEM combinado faltante de cada nodo
+      ansible.builtin.shell:
+        cmd: >-
+          set -eu;
+          umask 077;
+          temporary_pem="{{ item.pem_path }}.tmp";
+          cat "{{ item.private_key_path }}" "{{ item.certificate_path }}" > "$temporary_pem";
+          chmod 0600 "$temporary_pem";
+          mv "$temporary_pem" "{{ item.pem_path }}"
+        executable: /bin/sh
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+        index_var: node_index
+      when: not local_node_pem_stats.results[node_index].stat.exists
+      no_log: true
+
+    - name: Aplicar permisos finales a archivos privados
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "0600"
+      loop: >-
+        {{ [local_mongo_tls_ca_private_key_path, local_mongo_tls_ca_csr_path]
+           + (mongo_tls_local_nodes | map(attribute='private_key_path') | list)
+           + (mongo_tls_local_nodes | map(attribute='csr_path') | list)
+           + (mongo_tls_local_nodes | map(attribute='pem_path') | list) }}
+      no_log: true
+
+    - name: Aplicar permisos finales a certificados publicos
+      ansible.builtin.file:
+        path: "{{ item }}"
+        mode: "0644"
+      loop: >-
+        {{ [mongo_tls_ca_cert_path]
+           + (mongo_tls_local_nodes | map(attribute='certificate_path') | list) }}
+
+    - name: Validar cadena final de certificados de nodo
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - verify
+          - -CAfile
+          - "{{ mongo_tls_ca_cert_path }}"
+          - "{{ item.certificate_path }}"
+      loop: "{{ mongo_tls_local_nodes }}"
+      loop_control:
+        label: "{{ item.name }}"
+      changed_when: false
+
+    - name: Mostrar resultado de generacion local
+      ansible.builtin.debug:
+        msg:
+          openssl: "{{ local_openssl_version.stdout }}"
+          ca_certificate: "{{ mongo_tls_ca_cert_path }}"
+          node_pem_files: "{{ mongo_tls_local_nodes | map(attribute='pem_path') | list }}"
+          tls_enabled: "{{ mongo_tls_enabled }}"
+          deployment_mode: "{{ mongo_tls_deployment_mode }}"
+          next_step: "Ejecutar playbooks/security/validate_tls_pki.yml"
+
+- import_playbook: validate_tls_pki.yml

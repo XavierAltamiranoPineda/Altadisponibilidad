@@ -1,0 +1,68 @@
+---
+- name: Inicializar Replica Set MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    mongo_service: "mongo1"
+    replica_set: "rs0"
+
+  tasks:
+    - name: Obtener contenedor de MongoDB
+      ansible.builtin.shell:
+        cmd: docker ps -q --filter name={{ mongo_service }}
+      register: mongo_container
+      changed_when: false
+
+    - name: Validar contenedor MongoDB
+      ansible.builtin.assert:
+        that:
+          - mongo_container.stdout | trim != ""
+        fail_msg: "No se encontró el contenedor del servicio {{ mongo_service }}."
+        success_msg: "Contenedor MongoDB encontrado."
+
+    - name: Verificar estado actual del Replica Set
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo_container.stdout | trim }} mongosh --quiet
+          --username {{ mongo_admin_user }} --password {{ mongo_admin_password }}
+          --authenticationDatabase admin --eval "rs.status().ok"
+      register: replset_status
+      changed_when: false
+      failed_when: false
+      no_log: false
+
+    - name: Inicializar Replica Set
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo_container.stdout | trim }} mongosh --quiet
+          --username {{ mongo_admin_user }} --password {{ mongo_admin_password }}
+          --authenticationDatabase admin --eval
+          "rs.initiate({_id:'{{ replica_set }}',members:[{_id:0,host:'mongo1:27017'}]})"
+      when: replset_status.rc != 0
+      register: replset_init
+      no_log: false
+
+    - name: Esperar estabilización del Replica Set
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Verificar Replica Set
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo_container.stdout | trim }} mongosh --quiet
+          --username {{ mongo_admin_user }} --password {{ mongo_admin_password }}
+          --authenticationDatabase admin --eval "JSON.stringify(rs.status())"
+      register: replset_final
+      changed_when: false
+      no_log: true
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - "MongoDB disponible"
+          - "Replica Set: {{ replica_set }}"

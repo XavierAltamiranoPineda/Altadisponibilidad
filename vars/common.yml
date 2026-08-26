@@ -1,0 +1,102 @@
+# ============================================================
+# VARIABLES COMUNES - MONGODB
+# ============================================================
+
+mongo_replica_set: "rs0"
+
+# ============================================================
+# VARIABLES COMUNES - TLS
+# ============================================================
+
+# Estado seguro inicial. TLS solo se activara mediante un rollout posterior.
+mongo_tls_enabled: false
+mongo_tls_clients_enabled: false
+mongo_tls_target_mode: "requireTLS"
+mongo_tls_deployment_mode: "disabled"
+
+mongo_tls_withhold_client_certificate: true
+mongo_tls_allow_connections_without_certificates: true
+
+mongo_tls_provisioning_source: "pki_provided"
+mongo_tls_secret_version: "v1"
+mongo_tls_ca_secret_version: "{{ mongo_tls_secret_version }}"
+mongo_tls_node_secret_version: "{{ mongo_tls_secret_version }}"
+
+mongo_tls_client_ca_file: "/etc/ssl/certs/mongo_ca.pem"
+mongo_tls_runtime_dir: "/run/mongo-tls"
+mongo_tls_runtime_ca_file: "/run/mongo-tls/mongo_ca.pem"
+mongo_tls_runtime_certificate_key_file: "/run/mongo-tls/mongo.pem"
+
+# Parametros de volumenes de control para GATED_RESTART
+# NOTA DE ARQUITECTURA: driver 'local' es valido y seguro para single-node Swarm local.
+# En clusters Swarm multi-node se requiere volumen compartido o placement afin al nodo.
+mongo_tls_control_volume_driver: "local"
+mongo_tls_control_volume_driver_opts: {}
+mongo_tls_control_volume_names:
+  mongo1: "mongo1_tls_control"
+  mongo2: "mongo2_tls_control"
+  mongo3: "mongo3_tls_control"
+
+mongo_tls_node_extended_key_usage:
+  - "serverAuth"
+
+mongo_tls_node_key_usage:
+  - "digitalSignature"
+  - "keyEncipherment"
+  - "keyAgreement"
+
+mongo_tls_node_names:
+  - "mongo1"
+  - "mongo2"
+  - "mongo3"
+
+# Vigencias de laboratorio. No representan politica institucional.
+mongo_tls_local_ca_validity_days: 1095
+mongo_tls_local_cert_validity_days: 365
+mongo_tls_min_validity_days: 30
+
+# Supuestos que tls_image_preflight.yml debe comprobar en la imagen real.
+mongo_image: "mongo:7-jammy"
+mongo_image_expected_runtime_user: "mongodb"
+mongo_image_expected_runtime_group: "mongodb"
+mongo_image_expected_entrypoint: "/usr/local/bin/docker-entrypoint.sh"
+
+# Overrides reservados para una imagen distinta y aprobada explicitamente.
+mongo_image_runtime_user_override: null
+mongo_image_runtime_group_override: null
+mongo_image_entrypoint_override: null
+mongo_image_mongod_path_override: null
+
+# ============================================================
+# VARIABLES COMUNES - BACKUP
+# ============================================================
+
+backup_checksum_algorithm: "sha256"
+backup_extension: ".archive.gz"
+
+backup_retention_days: 30
+backup_monthly_retention_months: 12
+
+backup_schedule_hour: "02"
+backup_schedule_minute: "00"
+
+# Decision de implementacion.
+# Porcentaje minimo de espacio libre requerido antes de iniciar un backup.
+# Puede sobrescribirse por ambiente.
+backup_min_free_percent: 20
+
+backup_log_filename: "mongodb_backup.log"
+backup_retention_log_filename: "mongodb_retention.log"
+backup_lock_filename: "mongodb_backup.lock"
+backup_cron_log_filename: "mongodb_backup_cron.log"
+restore_evidence_log_filename: "mongodb_restore_evidence.log"
+
+# ============================================================
+# MONGODB DATABASE TOOLS
+# ============================================================
+
+mongodb_tools_version: "100.18.0"
+mongodb_tools_version_policy: "supported_for_platform"
+mongodb_tools_root: "{{ playbook_dir }}/../../tools/mongodb-database-tools"
+mongodb_tools_platform: "ubuntu2604"
+mongodb_tools_arch: "x86_64"

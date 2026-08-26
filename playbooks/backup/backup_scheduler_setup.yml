@@ -1,0 +1,228 @@
+---
+# ============================================================
+# CONFIGURACION DEL SCHEDULER CRON PARA RESPALDOS MONGODB
+# ============================================================
+# Configura el trabajo programado diario (02:00) para ejecutar
+# de forma no interactiva el proceso completo de respaldo:
+#   playbooks/backup/backup_process.yml
+#
+# Caracteristicas del diseno:
+#   - Idempotente: ansible.builtin.cron gestiona la entrada
+#   - Exclusividad: flock -n previene ejecuciones simultaneas
+#   - Autenticacion: --vault-password-file para ejecucion no interactiva
+#   - Bitacora: Redireccion de stdout/stderr a mongodb_backup_cron.log
+#   - Multiambiente: parametrizado con target_environment
+#
+# Uso:
+#   ansible-playbook playbooks/backup/backup_scheduler_setup.yml
+#   ansible-playbook playbooks/backup/backup_scheduler_setup.yml -e target_environment=development
+#   ansible-playbook playbooks/backup/backup_scheduler_setup.yml -e target_environment=production
+# ============================================================
+
+- name: Configurar Scheduler Cron para Respaldos MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+
+  vars:
+    target_environment: "local"
+    project_root: "{{ playbook_dir }}/../.."
+
+  tasks:
+
+    # ============================================================
+    # CARGA DE VARIABLES DEL AMBIENTE
+    # ============================================================
+
+    - name: "Cargar variables del ambiente: {{ target_environment }}"
+      ansible.builtin.include_vars:
+        file: "{{ playbook_dir }}/../../vars/{{ target_environment }}.yml"
+
+    # ============================================================
+    # VALIDACIONES DE CONFIGURACION
+    # ============================================================
+
+    - name: Validar tipo de scheduler configurado
+      ansible.builtin.assert:
+        that:
+          - backup_scheduler == "cron"
+        fail_msg: >-
+          [ERROR] El scheduler configurado para {{ environment_name }} es '{{ backup_scheduler }}'.
+          Este playbook unicamente configura scheduler de tipo 'cron'.
+        success_msg: "[OK] Scheduler validado: cron"
+
+    - name: Validar variables de horario y bitacoras
+      ansible.builtin.assert:
+        that:
+          - backup_schedule_hour is defined
+          - backup_schedule_hour | length > 0
+          - backup_schedule_minute is defined
+          - backup_schedule_minute | length > 0
+          - backup_log_root is defined
+          - backup_log_root | length > 0
+          - backup_cron_log_filename is defined
+          - backup_cron_log_filename | length > 0
+          - backup_lock_filename is defined
+          - backup_lock_filename | length > 0
+        fail_msg: "[ERROR] Faltan variables de horario o bitacoras en vars/common.yml o vars/{{ target_environment }}.yml"
+        success_msg: "[OK] Variables de horario ({{ backup_schedule_hour }}:{{ backup_schedule_minute }}) y bitacoras validadas"
+
+    # ============================================================
+    # RESOLUCION DE RUTAS Y EJECUTABLES EN EL HOST
+    # ============================================================
+
+    - name: Obtener ruta canonica del proyecto
+      ansible.builtin.command:
+        cmd: "realpath {{ project_root }}"
+      register: canonical_project_root
+      changed_when: false
+
+    - name: Definir ruta absoluta del proyecto
+      ansible.builtin.set_fact:
+        resolved_project_root: "{{ canonical_project_root.stdout }}"
+
+    - name: Verificar existencia del orquestador backup_process.yml
+      ansible.builtin.stat:
+        path: "{{ resolved_project_root }}/playbooks/backup/backup_process.yml"
+      register: backup_process_stat
+
+    - name: Validar presencia de backup_process.yml
+      ansible.builtin.assert:
+        that:
+          - backup_process_stat.stat.exists
+          - backup_process_stat.stat.isreg
+        fail_msg: "[ERROR] No se encontro {{ resolved_project_root }}/playbooks/backup/backup_process.yml"
+        success_msg: "[OK] Playbook orquestador backup_process.yml localizado"
+
+    - name: Detectar ruta del ejecutable ansible-playbook
+      ansible.builtin.shell: |
+        command -v ansible-playbook
+      register: detected_ansible_playbook
+      changed_when: false
+      failed_when: false
+
+    - name: Validar ejecutable ansible-playbook
+      ansible.builtin.assert:
+        that:
+          - detected_ansible_playbook.rc == 0
+          - detected_ansible_playbook.stdout | trim | length > 0
+        fail_msg: "[ERROR] No se encontro el comando 'ansible-playbook' en el PATH del sistema."
+        success_msg: "[OK] ansible-playbook detectado: {{ detected_ansible_playbook.stdout | trim }}"
+
+    - name: Detectar ruta del ejecutable flock
+      ansible.builtin.shell: |
+        command -v flock
+      register: detected_flock
+      changed_when: false
+      failed_when: false
+
+    - name: Validar ejecutable flock
+      ansible.builtin.assert:
+        that:
+          - detected_flock.rc == 0
+          - detected_flock.stdout | trim | length > 0
+        fail_msg: "[ERROR] No se encontro el comando 'flock' en el PATH del sistema."
+        success_msg: "[OK] flock detectado: {{ detected_flock.stdout | trim }}"
+
+    # ============================================================
+    # VALIDACION DE CLAVE VAULT NO INTERACTIVA
+    # ============================================================
+
+    - name: Validar definicion de ruta de password de Vault
+      ansible.builtin.assert:
+        that:
+          - ansible_vault_password_file is defined
+          - ansible_vault_password_file | length > 0
+        fail_msg: "[ERROR] La variable ansible_vault_password_file no esta definida en vars/{{ target_environment }}.yml"
+        success_msg: "[OK] Variable de ruta de Vault password configurada"
+
+    - name: Verificar estado del archivo de password de Vault
+      ansible.builtin.stat:
+        path: "{{ ansible_vault_password_file }}"
+      register: vault_password_stat
+
+    - name: Validar existencia, tipo y permisos seguros de Vault password
+      ansible.builtin.assert:
+        that:
+          - vault_password_stat.stat.exists
+          - vault_password_stat.stat.isreg
+          - vault_password_stat.stat.mode in ['0600', '0400']
+        fail_msg: >-
+          [ERROR] El archivo de clave Vault '{{ ansible_vault_password_file }}' no es valido.
+          Debe existir como archivo regular con permisos 0600 (chmod 0600 {{ ansible_vault_password_file }}).
+        success_msg: "[OK] Archivo de password de Vault validado con permisos seguros ({{ vault_password_stat.stat.mode }})"
+
+    - name: Obtener ruta canonica del archivo de password de Vault
+      ansible.builtin.command:
+        cmd: "realpath {{ ansible_vault_password_file }}"
+      register: canonical_vault_password_file
+      changed_when: false
+
+    # ============================================================
+    # PREPARACION DE DIRECTORIOS Y COMANDO CRON
+    # ============================================================
+
+    - name: Garantizar directorio de bitacoras en el host con permisos 0700
+      ansible.builtin.file:
+        path: "{{ backup_log_root }}"
+        state: directory
+        mode: "0700"
+
+    - name: Obtener ruta canonica del directorio de logs
+      ansible.builtin.command:
+        cmd: "realpath {{ backup_log_root }}"
+      register: canonical_backup_log_root
+      changed_when: false
+
+    - name: Definir rutas absolutas de lock y log de cron
+      ansible.builtin.set_fact:
+        resolved_lock_file: "{{ canonical_backup_log_root.stdout }}/{{ backup_lock_filename }}"
+        resolved_cron_log: "{{ canonical_backup_log_root.stdout }}/{{ backup_cron_log_filename }}"
+        resolved_vault_pass_file: "{{ canonical_vault_password_file.stdout }}"
+        resolved_ansible_playbook_bin: "{{ detected_ansible_playbook.stdout | trim }}"
+        resolved_flock_bin: "{{ detected_flock.stdout | trim }}"
+
+    - name: Construir comando del trabajo cron
+      ansible.builtin.set_fact:
+        backup_cron_job_cmd: >-
+          {{ resolved_flock_bin }} -n {{ resolved_lock_file }}
+          {{ resolved_ansible_playbook_bin }}
+          {{ resolved_project_root }}/playbooks/backup/backup_process.yml
+          -e target_environment={{ target_environment }}
+          --vault-password-file {{ resolved_vault_pass_file }}
+          >> {{ resolved_cron_log }} 2>&1
+
+    # ============================================================
+    # CONFIGURACION DE LA ENTRADA CRON
+    # ============================================================
+
+    - name: Programar ejecucion diaria de respaldo en cron
+      ansible.builtin.cron:
+        name: "MongoDB Backup Process - {{ environment_name }}"
+        minute: "{{ backup_schedule_minute }}"
+        hour: "{{ backup_schedule_hour }}"
+        job: "{{ backup_cron_job_cmd }}"
+        state: present
+
+    # ============================================================
+    # RESULTADO
+    # ============================================================
+
+    - name: Mostrar resultado final de configuracion
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "SCHEDULER MONGODB CONFIGURADO"
+          - "============================================================"
+          - "Ambiente: {{ environment_name }}"
+          - "Scheduler: {{ backup_scheduler }}"
+          - "Horario: {{ backup_schedule_hour }}:{{ backup_schedule_minute }} (Diario)"
+          - "Proceso: {{ resolved_project_root }}/playbooks/backup/backup_process.yml"
+          - "Lockfile: {{ resolved_lock_file }}"
+          - "Log cron: {{ resolved_cron_log }}"
+          - "Vault: Configurado de forma no interactiva"
+          - "Estado: ACTIVO"
+          - "============================================================"

@@ -1,0 +1,202 @@
+---
+- name: Reset completo del entorno MongoDB V2 local
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    mongo_services:
+      - mongo1
+      - mongo2
+      - mongo3
+
+    mongo_volumes:
+      - mongo1_data
+      - mongo2_data
+      - mongo3_data
+
+    mongo_secret: "mongo_keyfile"
+
+  tasks:
+
+    # ============================================================
+    # 1. ELIMINAR SERVICIOS MONGODB V2
+    # ============================================================
+
+    - name: Verificar servicios MongoDB existentes
+      ansible.builtin.command:
+        cmd: "docker service inspect {{ item }}"
+      loop: "{{ mongo_services }}"
+      register: service_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Eliminar servicios MongoDB existentes
+      ansible.builtin.command:
+        cmd: "docker service rm {{ item.item }}"
+      loop: "{{ service_checks.results }}"
+      when: item.rc == 0
+      changed_when: true
+
+    # ============================================================
+    # 2. ESPERAR QUE SWARM ELIMINE LOS SERVICIOS
+    # ============================================================
+
+    - name: Esperar eliminacion completa de servicios
+      ansible.builtin.command:
+        cmd: "docker service inspect {{ item }}"
+      loop: "{{ mongo_services }}"
+      register: removed_services
+      retries: 30
+      delay: 2
+      until: removed_services.rc != 0
+      changed_when: false
+      failed_when: false
+
+    - name: Mostrar servicios eliminados
+      ansible.builtin.debug:
+        msg: "[OK] Servicios mongo1, mongo2 y mongo3 eliminados."
+
+    # ============================================================
+    # 3. ESPERAR LIMPIEZA DE TAREAS DE SWARM
+    # ============================================================
+
+    - name: Esperar liberacion inicial de contenedores Swarm
+      ansible.builtin.pause:
+        seconds: 5
+
+    - name: Buscar contenedores que usan volumenes MongoDB V2
+      ansible.builtin.shell:
+        cmd: |
+          docker ps -aq --filter "volume={{ item }}"
+      loop: "{{ mongo_volumes }}"
+      register: volume_containers
+      changed_when: false
+
+    # ============================================================
+    # 4. ELIMINAR SOLO CONTENEDORES ANTIGUOS V2
+    # ============================================================
+
+    - name: Eliminar contenedores antiguos asociados a volumenes V2
+      ansible.builtin.shell:
+        cmd: |
+          CONTAINERS=$(docker ps -aq --filter "volume={{ item }}")
+
+          if [ -n "$CONTAINERS" ]; then
+            docker rm -f $CONTAINERS
+          fi
+      loop: "{{ mongo_volumes }}"
+      register: container_cleanup
+      changed_when: container_cleanup.stdout | trim != ""
+      failed_when: false
+
+    - name: Esperar que los volumenes queden libres
+      ansible.builtin.shell:
+        cmd: |
+          docker ps -aq --filter "volume={{ item }}"
+      loop: "{{ mongo_volumes }}"
+      register: volume_usage
+      retries: 30
+      delay: 2
+      until: volume_usage.stdout | trim == ""
+      changed_when: false
+
+    - name: Mostrar limpieza de contenedores
+      ansible.builtin.debug:
+        msg: "[OK] Contenedores/tareas antiguas MongoDB V2 eliminados."
+
+    # ============================================================
+    # 5. ELIMINAR VOLUMENES V2
+    # ============================================================
+
+    - name: Verificar volumenes MongoDB
+      ansible.builtin.command:
+        cmd: "docker volume inspect {{ item }}"
+      loop: "{{ mongo_volumes }}"
+      register: volume_checks
+      changed_when: false
+      failed_when: false
+
+    - name: Eliminar volumenes MongoDB existentes
+      ansible.builtin.command:
+        cmd: "docker volume rm {{ item.item }}"
+      loop: "{{ volume_checks.results }}"
+      when: item.rc == 0
+      register: volume_remove
+      changed_when: true
+
+    # ============================================================
+    # 6. ELIMINAR SECRET V2
+    # ============================================================
+
+    - name: Verificar secret mongo_keyfile
+      ansible.builtin.command:
+        cmd: "docker secret inspect {{ mongo_secret }}"
+      register: secret_check
+      changed_when: false
+      failed_when: false
+
+    - name: Eliminar secret mongo_keyfile
+      ansible.builtin.command:
+        cmd: "docker secret rm {{ mongo_secret }}"
+      when: secret_check.rc == 0
+      changed_when: true
+
+    # ============================================================
+    # 7. VALIDAR LIMPIEZA
+    # ============================================================
+
+    - name: Validar servicios eliminados
+      ansible.builtin.shell:
+        cmd: |
+          docker service ls --format '{{ "{{.Name}}" }}' \
+          | grep -E '^(mongo1|mongo2|mongo3)$' || true
+      register: final_services
+      changed_when: false
+
+    - name: Validar volumenes eliminados
+      ansible.builtin.shell:
+        cmd: |
+          docker volume ls --format '{{ "{{.Name}}" }}' \
+          | grep -E '^(mongo1_data|mongo2_data|mongo3_data)$' || true
+      register: final_volumes
+      changed_when: false
+
+    - name: Validar secret eliminado
+      ansible.builtin.shell:
+        cmd: |
+          docker secret ls --format '{{ "{{.Name}}" }}' \
+          | grep '^mongo_keyfile$' || true
+      register: final_secret
+      changed_when: false
+
+    - name: Validar resultado del reset
+      ansible.builtin.assert:
+        that:
+          - final_services.stdout | trim == ""
+          - final_volumes.stdout | trim == ""
+          - final_secret.stdout | trim == ""
+        fail_msg: "ERROR: Quedaron recursos MongoDB V2 sin eliminar."
+        success_msg: "OK: Entorno MongoDB V2 eliminado completamente."
+
+    # ============================================================
+    # 8. RESULTADO FINAL
+    # ============================================================
+
+    - name: Resultado final
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "RESET LOCAL MONGODB V2 COMPLETADO"
+          - "============================================================"
+          - "[OK] mongo1 eliminado"
+          - "[OK] mongo2 eliminado"
+          - "[OK] mongo3 eliminado"
+          - "[OK] mongo1_data eliminado"
+          - "[OK] mongo2_data eliminado"
+          - "[OK] mongo3_data eliminado"
+          - "[OK] mongo_keyfile eliminado"
+          - "[OK] mongo_swarm_net CONSERVADA"
+          - "[OK] Docker Swarm CONSERVADO"
+          - "[OK] Recursos V1 NO modificados"
+          - "============================================================"

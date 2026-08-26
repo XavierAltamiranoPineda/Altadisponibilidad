@@ -1,0 +1,163 @@
+---
+- name: Eliminar solamente base prueba_ha
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    test_database: "prueba_ha"
+
+  tasks:
+
+    # ============================================================
+    # 1. BUSCAR CUALQUIER NODO MONGODB DISPONIBLE
+    # ============================================================
+
+    - name: Buscar nodo MongoDB disponible
+      ansible.builtin.shell:
+        cmd: |
+          for SERVICE in mongo1 mongo2 mongo3; do
+            CONTAINER=$(docker ps -q \
+              --filter "label=com.docker.swarm.service.name=$SERVICE" \
+              | head -n 1)
+
+            if [ -n "$CONTAINER" ]; then
+              echo "$CONTAINER"
+              exit 0
+            fi
+          done
+
+          exit 0
+      register: available_container
+      changed_when: false
+
+    - name: Informar si MongoDB ya fue eliminado
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "LIMPIEZA prueba_ha"
+          - "============================================================"
+          - "[OK] No existen nodos MongoDB V2 activos."
+          - "[OK] Si los volumenes ya fueron eliminados, prueba_ha ya no existe."
+          - "[OK] La conexion guardada en Compass NO fue modificada."
+          - "============================================================"
+      when: available_container.stdout | trim == ""
+
+    # ============================================================
+    # 2. LIMPIAR BASE SI EL CLUSTER SIGUE ACTIVO
+    # ============================================================
+
+    - name: Eliminar prueba_ha si MongoDB esta disponible
+      when: available_container.stdout | trim != ""
+      block:
+
+        - name: Detectar PRIMARY actual
+          ansible.builtin.command:
+            cmd: >
+              docker exec {{ available_container.stdout | trim }}
+              mongosh --quiet
+              --username {{ mongo_admin_user }}
+              --password {{ mongo_admin_password }}
+              --authenticationDatabase admin
+              --eval "db.hello().primary"
+          register: current_primary
+          changed_when: false
+          no_log: true
+
+        - name: Validar PRIMARY detectado
+          ansible.builtin.assert:
+            that:
+              - current_primary.stdout | trim in
+                ["mongo1:27017", "mongo2:27017", "mongo3:27017"]
+            fail_msg: "ERROR: No fue posible detectar el PRIMARY."
+            success_msg: "OK: PRIMARY detectado."
+
+        - name: Obtener servicio PRIMARY
+          ansible.builtin.set_fact:
+            primary_service: >-
+              {{
+                current_primary.stdout
+                | trim
+                | regex_replace(':27017$', '')
+              }}
+
+        - name: Obtener contenedor PRIMARY
+          ansible.builtin.shell:
+            cmd: >
+              docker ps -q
+              --filter "label=com.docker.swarm.service.name={{ primary_service }}"
+              | head -n 1
+          register: primary_container
+          changed_when: false
+
+        - name: Validar contenedor PRIMARY
+          ansible.builtin.assert:
+            that:
+              - primary_container.stdout | trim != ""
+            fail_msg: "ERROR: No se encontro el contenedor del PRIMARY."
+            success_msg: "OK: Contenedor PRIMARY encontrado."
+
+        # ========================================================
+        # 3. ELIMINAR SOLAMENTE prueba_ha
+        # ========================================================
+
+        - name: Eliminar base prueba_ha
+          ansible.builtin.command:
+            cmd: >
+              docker exec {{ primary_container.stdout | trim }}
+              mongosh --quiet
+              --username {{ mongo_admin_user }}
+              --password {{ mongo_admin_password }}
+              --authenticationDatabase admin
+              --eval "db.getSiblingDB('{{ test_database }}').dropDatabase().ok"
+          register: drop_database
+          changed_when: true
+          no_log: true
+
+        - name: Validar eliminacion de prueba_ha
+          ansible.builtin.assert:
+            that:
+              - drop_database.stdout | trim == "1"
+            fail_msg: "ERROR: No fue posible eliminar prueba_ha."
+            success_msg: "OK: Base prueba_ha eliminada."
+
+        # ========================================================
+        # 4. COMPROBAR QUE YA NO EXISTE
+        # ========================================================
+
+        - name: Verificar bases existentes
+          ansible.builtin.command:
+            cmd: >
+              docker exec {{ primary_container.stdout | trim }}
+              mongosh --quiet
+              --username {{ mongo_admin_user }}
+              --password {{ mongo_admin_password }}
+              --authenticationDatabase admin
+              --eval "db.adminCommand({listDatabases:1}).databases.map(d => d.name).join(',')"
+          register: databases_after_cleanup
+          changed_when: false
+          no_log: true
+
+        - name: Confirmar que prueba_ha desaparecio
+          ansible.builtin.assert:
+            that:
+              - "'prueba_ha' not in databases_after_cleanup.stdout"
+            fail_msg: "ERROR: prueba_ha todavia existe."
+            success_msg: "OK: prueba_ha ya no existe."
+
+        - name: Resultado final
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "LIMPIEZA DE DATOS DE PRUEBA COMPLETADA"
+              - "============================================================"
+              - "[OK] Base eliminada: prueba_ha"
+              - "[OK] PRIMARY utilizado: {{ current_primary.stdout | trim }}"
+              - "[OK] admin conservada"
+              - "[OK] config conservada"
+              - "[OK] local conservada"
+              - "[OK] Conexion guardada de Compass NO modificada"
+              - "============================================================"

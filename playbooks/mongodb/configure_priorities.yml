@@ -1,0 +1,146 @@
+---
+- name: Configurar prioridades del Replica Set MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  tasks:
+
+    - name: Obtener contenedor mongo1
+      ansible.builtin.shell:
+        cmd: docker ps -q --filter name=mongo1
+      register: mongo1_container
+      changed_when: false
+
+    - name: Validar contenedor mongo1
+      ansible.builtin.assert:
+        that:
+          - mongo1_container.stdout | trim != ""
+        fail_msg: "ERROR: No se encontro mongo1."
+        success_msg: "OK: mongo1 encontrado."
+
+    - name: Detectar PRIMARY actual
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.hello().primary"
+      register: current_primary
+      changed_when: false
+      no_log: true
+
+    - name: Mostrar PRIMARY actual
+      ansible.builtin.debug:
+        msg: "PRIMARY actual: {{ current_primary.stdout | trim }}"
+
+    - name: Obtener servicio del PRIMARY
+      ansible.builtin.set_fact:
+        primary_service: "{{ current_primary.stdout | trim | regex_replace(':27017$', '') }}"
+
+    - name: Obtener contenedor del PRIMARY
+      ansible.builtin.shell:
+        cmd: "docker ps -q --filter name={{ primary_service }}"
+      register: primary_container
+      changed_when: false
+
+    - name: Validar contenedor PRIMARY
+      ansible.builtin.assert:
+        that:
+          - primary_container.stdout | trim != ""
+        fail_msg: "ERROR: No se encontro el contenedor del PRIMARY."
+        success_msg: "OK: Contenedor PRIMARY encontrado."
+
+    - name: Configurar prioridades
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ primary_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "
+          cfg = rs.conf();
+          cfg.members.forEach(function(m) {
+            if (m.host === 'mongo1:27017') {
+              m.priority = 2;
+            } else if (m.host === 'mongo2:27017') {
+              m.priority = 1;
+            } else if (m.host === 'mongo3:27017') {
+              m.priority = 1;
+            }
+          });
+          rs.reconfig(cfg);
+          "
+      register: priority_config
+      changed_when: true
+      no_log: true
+
+    - name: Esperar estabilizacion del Replica Set
+      ansible.builtin.pause:
+        seconds: 10
+
+    - name: Obtener contenedor mongo1 actualizado
+      ansible.builtin.shell:
+        cmd: docker ps -q --filter name=mongo1
+      register: mongo1_updated_container
+      changed_when: false
+
+    - name: Consultar prioridades configuradas
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_updated_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "rs.conf().members.map(m => m.host + ' | priority=' + m.priority).join(';')"
+      register: priorities
+      changed_when: false
+      no_log: true
+
+    - name: Validar prioridades
+      ansible.builtin.assert:
+        that:
+          - "'mongo1:27017 | priority=2' in priorities.stdout"
+          - "'mongo2:27017 | priority=1' in priorities.stdout"
+          - "'mongo3:27017 | priority=1' in priorities.stdout"
+        fail_msg: "ERROR: Las prioridades no quedaron correctamente configuradas."
+        success_msg: "OK: Prioridades configuradas correctamente."
+
+    - name: Esperar que mongo1 sea PRIMARY preferido
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_updated_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.hello().primary"
+      register: preferred_primary
+      retries: 60
+      delay: 3
+      until:
+        - preferred_primary.rc == 0
+        - preferred_primary.stdout | trim == "mongo1:27017"
+      changed_when: false
+      no_log: true
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "PRIORIDADES REPLICA SET MONGODB V2"
+          - "============================================================"
+          - "mongo1: priority=2"
+          - "mongo2: priority=1"
+          - "mongo3: priority=1"
+          - ""
+          - "[OK] PRIMARY preferido: {{ preferred_primary.stdout | trim }}"
+          - "[OK] mongo1 configurado con mayor prioridad"
+          - "============================================================"

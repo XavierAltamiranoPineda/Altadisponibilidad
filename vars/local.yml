@@ -1,0 +1,71 @@
+---
+# ============================================================
+# AMBIENTE LOCAL
+# ============================================================
+
+environment_name: "local"
+
+# ============================================================
+# TLS LOCAL - ESTADO INICIAL Y RUTAS PKI
+# ============================================================
+
+mongo_tls_enabled: true
+mongo_tls_clients_enabled: false
+mongo_tls_target_mode: "requireTLS"
+mongo_tls_deployment_mode: "allowTLS"
+
+mongo_tls_provisioning_source: "ansible_local_ca"
+mongo_tls_secret_version: "v1"
+
+local_mongo_tls_pki_root: "{{ playbook_dir }}/../../secrets/mongodb-tls/local"
+local_mongo_tls_ca_private_key_path: "{{ local_mongo_tls_pki_root }}/ca/mongo_local_root_ca.key"
+mongo_tls_ca_cert_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_ca_secret_version }}/mongo_ca.pem"
+
+mongo_tls_nodes_certificates:
+  mongo1:
+    pem_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo1/mongo1.pem"
+  mongo2:
+    pem_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo2/mongo2.pem"
+  mongo3:
+    pem_path: "{{ local_mongo_tls_pki_root }}/{{ mongo_tls_node_secret_version }}/mongo3/mongo3.pem"
+
+# Base utilizada por las pruebas de Fase 1
+mongo_database: "prueba_ha"
+
+# URI de conexion para respaldo con alta disponibilidad (Replica Set)
+# Conecta a la red overlay mongo_swarm_net con descubrimiento de rs0
+# Sin credenciales (las credenciales se leen desde vars/vault_mongodb.yml)
+mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0"
+
+# Red overlay de Docker Swarm a la que se conecta el contenedor temporal
+mongo_backup_network: "mongo_swarm_net"
+
+# Imagen Docker dedicada para las herramientas de respaldo
+mongo_backup_tools_image: "mongo-backup-tools:100.18.0"
+
+# Imagen base del contenedor alineada con la plataforma de Database Tools
+mongodb_tools_container_base_image: "ubuntu:26.04"
+
+# Servicios MongoDB usados exclusivamente para la deteccion de trazabilidad
+mongo_trace_services:
+  - "mongo1"
+  - "mongo2"
+  - "mongo3"
+
+# Plataforma de herramientas para ambiente local
+mongodb_tools_platform: "ubuntu2604"
+mongodb_tools_arch: "x86_64"
+
+# Repositorio local de respaldos
+backup_root: "{{ playbook_dir }}/../../backups/mongodb"
+
+# Directorio local de logs
+backup_log_root: "{{ playbook_dir }}/../../logs"
+
+# Ruta del archivo de password de Vault para ejecucion no interactiva (Cron)
+ansible_vault_password_file: "{{ playbook_dir }}/../../secrets/vault_password"
+
+# Automatizacion local
+backup_scheduler: "cron"
+mongo_backup_host: "127.0.0.1"
+mongo_backup_port: 27017

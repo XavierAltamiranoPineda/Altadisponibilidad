@@ -1,0 +1,72 @@
+---
+# ============================================================
+# SELECCION DE BACKUP POR TIMESTAMP CRONOLOGICO (YYYYMMDD_HHMMSS)
+# ============================================================
+
+- name: Localizar el archivo de respaldo mas reciente por timestamp en nombre
+  ansible.builtin.shell: |
+    python3 -c '
+    import os, sys, re
+
+    root = sys.argv[1]
+    db = sys.argv[2]
+    ext = sys.argv[3]
+    pattern = re.compile(r"^" + re.escape(db) + r"_(\d{8}_\d{6})" + re.escape(ext) + r"$")
+
+    candidates = []
+    if os.path.exists(root):
+        for dirpath, _, filenames in os.walk(root):
+            for f in filenames:
+                m = pattern.match(f)
+                if m:
+                    ts = m.group(1)
+                    full_path = os.path.join(dirpath, f)
+                    candidates.append((ts, full_path, f))
+
+    if not candidates:
+        sys.exit(1)
+
+    # Ordenar por timestamp cronologico YYYYMMDD_HHMMSS de forma ascendente
+    candidates.sort(key=lambda x: x[0])
+    print(candidates[-1][1])
+    ' "{{ backup_root }}/{{ mongo_database }}" "{{ mongo_database }}" "{{ backup_extension }}"
+  register: selected_backup_cmd
+  changed_when: false
+  failed_when: false
+
+- name: Validar localizacion de archivo de respaldo valido
+  ansible.builtin.assert:
+    that:
+      - selected_backup_cmd.rc == 0
+      - selected_backup_cmd.stdout | trim | length > 0
+    fail_msg: "[ERROR] No se localizo ningun archivo de respaldo valido con patron {{ mongo_database }}_YYYYMMDD_HHMMSS{{ backup_extension }} en {{ backup_root }}/{{ mongo_database }}"
+    success_msg: "[OK] Respaldo localizado por timestamp: {{ selected_backup_cmd.stdout | trim }}"
+
+- name: Definir rutas de respaldo y checksum
+  ansible.builtin.set_fact:
+    backup_file_path: "{{ selected_backup_cmd.stdout | trim }}"
+    backup_filename: "{{ selected_backup_cmd.stdout | trim | basename }}"
+    checksum_file_path: "{{ selected_backup_cmd.stdout | trim }}.sha256"
+
+- name: Verificar estado del archivo de respaldo en el sistema de archivos
+  ansible.builtin.stat:
+    path: "{{ backup_file_path }}"
+  register: stat_backup_file
+
+- name: Verificar estado del archivo de checksum en el sistema de archivos
+  ansible.builtin.stat:
+    path: "{{ checksum_file_path }}"
+  register: stat_checksum_file
+
+- name: Validar existencia y tipo de archivo para backup y checksum
+  ansible.builtin.assert:
+    that:
+      - stat_backup_file.stat.exists
+      - stat_backup_file.stat.isreg
+      - stat_checksum_file.stat.exists
+      - stat_checksum_file.stat.isreg
+    fail_msg: >-
+      [ERROR] El archivo de respaldo o su archivo checksum (.sha256) no existen o no son archivos regulares.
+      Backup: {{ backup_file_path }} (Existe: {{ stat_backup_file.stat.exists | default(false) }})
+      Checksum: {{ checksum_file_path }} (Existe: {{ stat_checksum_file.stat.exists | default(false) }})
+    success_msg: "[OK] Archivo de respaldo y archivo checksum verificados como archivos regulares"

@@ -1,0 +1,506 @@
+---
+- name: Prueba completa de Alta Disponibilidad MongoDB V2
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    test_database: "prueba_ha"
+    test_collection: "registros"
+
+  tasks:
+
+    # ============================================================
+    # 1. ESTADO INICIAL
+    # ============================================================
+
+    - name: Obtener contenedor mongo1
+      ansible.builtin.shell:
+        cmd: docker ps -q --filter name=mongo1
+      register: mongo1_container
+      changed_when: false
+
+    - name: Validar mongo1
+      ansible.builtin.assert:
+        that:
+          - mongo1_container.stdout | trim != ""
+        fail_msg: "ERROR: mongo1 no esta disponible."
+        success_msg: "OK: mongo1 disponible."
+
+    - name: Detectar PRIMARY inicial
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.hello().primary"
+      register: initial_primary
+      changed_when: false
+      no_log: true
+
+    - name: Validar PRIMARY inicial
+      ansible.builtin.assert:
+        that:
+          - initial_primary.stdout | trim == "mongo1:27017"
+        fail_msg: "ERROR: mongo1 no es PRIMARY al iniciar la prueba."
+        success_msg: "OK: mongo1 es PRIMARY inicial."
+
+    - name: Mostrar estado inicial
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "ESTADO INICIAL"
+          - "============================================================"
+          - "PRIMARY: {{ initial_primary.stdout | trim }}"
+          - "mongo1 priority=2"
+          - "mongo2 priority=1"
+          - "mongo3 priority=1"
+          - "============================================================"
+
+    # ============================================================
+    # 2. FAILOVER
+    # ============================================================
+
+    - name: Ejecutar prueba de failover
+      block:
+
+        # --------------------------------------------------------
+        # 2.1 DETENER MONGO1 SIN ELIMINAR EL SERVICIO
+        # --------------------------------------------------------
+
+        - name: Detener PRIMARY mongo1
+          ansible.builtin.command:
+            cmd: docker service scale mongo1=0
+          changed_when: true
+
+        - name: Esperar mongo1 detenido
+          ansible.builtin.command:
+            cmd: >
+              docker service ls
+              --filter name=mongo1
+              --format "{{ '{{.Replicas}}' }}"
+          register: mongo1_down
+          retries: 30
+          delay: 2
+          until: mongo1_down.stdout | trim == "0/0"
+          changed_when: false
+
+        - name: Mostrar falla simulada
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "FALLA SIMULADA"
+              - "============================================================"
+              - "[OK] mongo1 escalado a 0 replicas"
+              - "[OK] Servicio mongo1 conservado"
+              - "[OK] Volumen mongo1_data conservado"
+              - "[OK] Esperando nuevo PRIMARY"
+              - "============================================================"
+
+        # --------------------------------------------------------
+        # 2.2 OBTENER MONGO2
+        # --------------------------------------------------------
+
+        - name: Obtener contenedor mongo2
+          ansible.builtin.shell:
+            cmd: docker ps -q --filter name=mongo2
+          register: mongo2_container
+          changed_when: false
+
+        - name: Validar mongo2
+          ansible.builtin.assert:
+            that:
+              - mongo2_container.stdout | trim != ""
+            fail_msg: "ERROR: mongo2 no esta disponible."
+            success_msg: "OK: mongo2 disponible."
+
+        # --------------------------------------------------------
+        # 2.3 ESPERAR NUEVO PRIMARY
+        # --------------------------------------------------------
+
+        - name: Esperar nuevo PRIMARY
+          ansible.builtin.command:
+            cmd: >
+              docker exec {{ mongo2_container.stdout | trim }}
+              mongosh --quiet
+              --username {{ mongo_admin_user }}
+              --password {{ mongo_admin_password }}
+              --authenticationDatabase admin
+              --eval "db.hello().primary"
+          register: failover_primary
+          retries: 40
+          delay: 3
+          until:
+            - failover_primary.rc == 0
+            - failover_primary.stdout | trim in ["mongo2:27017", "mongo3:27017"]
+          changed_when: false
+          no_log: true
+
+        - name: Mostrar nuevo PRIMARY
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "FAILOVER REALIZADO"
+              - "============================================================"
+              - "Nuevo PRIMARY: {{ failover_primary.stdout | trim }}"
+              - "============================================================"
+
+        # --------------------------------------------------------
+        # 2.4 IDENTIFICAR CONTENEDOR DEL NUEVO PRIMARY
+        # --------------------------------------------------------
+
+        - name: Obtener servicio del nuevo PRIMARY
+          ansible.builtin.set_fact:
+            failover_primary_service: >-
+              {{
+                failover_primary.stdout
+                | trim
+                | regex_replace(':27017$', '')
+              }}
+
+        - name: Obtener contenedor del nuevo PRIMARY
+          ansible.builtin.shell:
+            cmd: "docker ps -q --filter name={{ failover_primary_service }}"
+          register: failover_primary_container
+          changed_when: false
+
+        - name: Validar nuevo PRIMARY
+          ansible.builtin.assert:
+            that:
+              - failover_primary_container.stdout | trim != ""
+            fail_msg: "ERROR: No se encontro el nuevo PRIMARY."
+            success_msg: "OK: Nuevo PRIMARY disponible."
+
+        # --------------------------------------------------------
+        # 2.5 ESCRIBIR MIENTRAS MONGO1 ESTA CAIDO
+        # --------------------------------------------------------
+
+        - name: Crear documento durante el failover
+          ansible.builtin.command:
+            cmd: >
+              docker exec {{ failover_primary_container.stdout | trim }}
+              mongosh --quiet
+              --username {{ mongo_admin_user }}
+              --password {{ mongo_admin_password }}
+              --authenticationDatabase admin
+              --eval "
+              db.getSiblingDB('{{ test_database }}').{{ test_collection }}.updateOne(
+                { prueba: 'escritura_durante_failover' },
+                {
+                  $set: {
+                    prueba: 'escritura_durante_failover',
+                    descripcion: 'Documento creado mientras mongo1 estaba fuera de servicio',
+                    primary_escritura: '{{ failover_primary.stdout | trim }}',
+                    estado: 'CREADO_DURANTE_FAILOVER',
+                    fecha: new Date()
+                  }
+                },
+                { upsert: true }
+              ).acknowledged
+              "
+          register: failover_write
+          changed_when: true
+          no_log: true
+
+        - name: Validar escritura durante failover
+          ansible.builtin.assert:
+            that:
+              - failover_write.stdout | trim == "true"
+            fail_msg: "ERROR: No fue posible escribir durante el failover."
+            success_msg: "OK: Escritura realizada durante el failover."
+
+        - name: Verificar documento en PRIMARY temporal
+          ansible.builtin.command:
+            cmd: >
+              docker exec {{ failover_primary_container.stdout | trim }}
+              mongosh --quiet
+              --username {{ mongo_admin_user }}
+              --password {{ mongo_admin_password }}
+              --authenticationDatabase admin
+              --eval "
+              db.getSiblingDB('{{ test_database }}').{{ test_collection }}.countDocuments(
+                {
+                  prueba: 'escritura_durante_failover',
+                  estado: 'CREADO_DURANTE_FAILOVER'
+                }
+              )
+              "
+          register: document_on_failover_primary
+          changed_when: false
+          no_log: true
+
+        - name: Validar documento en PRIMARY temporal
+          ansible.builtin.assert:
+            that:
+              - document_on_failover_primary.stdout | trim | int > 0
+            fail_msg: "ERROR: El documento no se encontro en el PRIMARY temporal."
+            success_msg: "OK: Documento confirmado en el nuevo PRIMARY."
+
+        - name: Mostrar escritura durante falla
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "ESCRITURA DURANTE FAILOVER"
+              - "============================================================"
+              - "[OK] mongo1 continua detenido"
+              - "[OK] PRIMARY temporal: {{ failover_primary.stdout | trim }}"
+              - "[OK] Documento: escritura_durante_failover"
+              - "[OK] Estado: CREADO_DURANTE_FAILOVER"
+              - "============================================================"
+
+      # ==========================================================
+      # 3. RECUPERAR MONGO1 SIEMPRE
+      # ==========================================================
+
+      always:
+
+        - name: Recuperar servicio mongo1
+          ansible.builtin.command:
+            cmd: docker service scale mongo1=1
+          changed_when: true
+
+        - name: Esperar mongo1 recuperado
+          ansible.builtin.command:
+            cmd: >
+              docker service ls
+              --filter name=mongo1
+              --format "{{ '{{.Replicas}}' }}"
+          register: mongo1_replicas
+          retries: 40
+          delay: 3
+          until: mongo1_replicas.stdout | trim == "1/1"
+          changed_when: false
+
+        - name: Esperar contenedor activo de mongo1
+          ansible.builtin.shell:
+            cmd: docker ps -q --filter name=mongo1
+          register: mongo1_active
+          retries: 20
+          delay: 2
+          until: mongo1_active.stdout | trim != ""
+          changed_when: false
+
+        - name: Limpiar contenedores detenidos antiguos de mongo1
+          ansible.builtin.shell:
+            cmd: |
+              OLD_CONTAINERS=$(docker ps -aq \
+                --filter "label=com.docker.swarm.service.name=mongo1" \
+                --filter "status=exited")
+
+              if [ -n "$OLD_CONTAINERS" ]; then
+                docker rm $OLD_CONTAINERS
+              fi
+          register: mongo1_cleanup
+          changed_when: mongo1_cleanup.stdout | trim != ""
+          failed_when: false
+
+        - name: Mostrar recuperacion
+          ansible.builtin.debug:
+            msg:
+              - "============================================================"
+              - "RECUPERACION"
+              - "============================================================"
+              - "[OK] mongo1 recuperado"
+              - "[OK] Servicio mongo1 conservado"
+              - "[OK] Volumen mongo1_data conservado"
+              - "[OK] Contenedores detenidos antiguos limpiados"
+              - "============================================================"
+
+    # ============================================================
+    # 4. OBTENER MONGO1 RECUPERADO
+    # ============================================================
+
+    - name: Obtener contenedor mongo1 recuperado
+      ansible.builtin.shell:
+        cmd: docker ps -q --filter name=mongo1
+      register: mongo1_new_container
+      changed_when: false
+
+    - name: Validar mongo1 recuperado
+      ansible.builtin.assert:
+        that:
+          - mongo1_new_container.stdout | trim != ""
+        fail_msg: "ERROR: mongo1 no se recupero."
+        success_msg: "OK: mongo1 recuperado."
+
+    # ============================================================
+    # 5. ESPERAR QUE MONGO1 REGRESE AL REPLICA SET
+    # ============================================================
+
+    - name: Esperar salud de mongo1
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_new_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "
+          const m = rs.status().members.find(
+            x => x.name === 'mongo1:27017'
+          );
+          m ? m.health : 0
+          "
+      register: mongo1_health
+      retries: 40
+      delay: 3
+      until:
+        - mongo1_health.rc == 0
+        - mongo1_health.stdout | trim == "1"
+      changed_when: false
+      no_log: true
+
+    # ============================================================
+    # 6. VERIFICAR SINCRONIZACION
+    # ============================================================
+
+    - name: Esperar documento sincronizado hacia mongo1
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_new_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "
+          db.getMongo().setReadPref('secondaryPreferred');
+          db.getSiblingDB('{{ test_database }}').{{ test_collection }}.countDocuments(
+            {
+              prueba: 'escritura_durante_failover',
+              estado: 'CREADO_DURANTE_FAILOVER'
+            }
+          )
+          "
+      register: replicated_document
+      retries: 40
+      delay: 3
+      until:
+        - replicated_document.rc == 0
+        - replicated_document.stdout | trim | int > 0
+      changed_when: false
+      no_log: true
+
+    - name: Validar documento sincronizado
+      ansible.builtin.assert:
+        that:
+          - replicated_document.stdout | trim | int > 0
+        fail_msg: "ERROR: El documento no fue sincronizado hacia mongo1."
+        success_msg: "OK: Documento sincronizado correctamente hacia mongo1."
+
+    - name: Mostrar sincronizacion
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "SINCRONIZACION VALIDADA"
+          - "============================================================"
+          - "[OK] Documento creado durante la falla"
+          - "[OK] Documento encontrado en mongo1 recuperado"
+          - "[OK] Replicacion completada"
+          - "============================================================"
+
+    # ============================================================
+    # 7. ESPERAR FAILBACK POR PRIORIDAD
+    # ============================================================
+
+    - name: Esperar que mongo1 recupere PRIMARY
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_new_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "db.hello().primary"
+      register: final_primary
+      retries: 80
+      delay: 3
+      until:
+        - final_primary.rc == 0
+        - final_primary.stdout | trim == "mongo1:27017"
+      changed_when: false
+      no_log: true
+
+    # ============================================================
+    # 8. ESTADO FINAL
+    # ============================================================
+
+    - name: Obtener estado final
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_new_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "
+          rs.status().members.map(
+            m => m.name + ' | ' + m.stateStr + ' | health=' + m.health
+          ).join(';')
+          "
+      register: final_status
+      changed_when: false
+      no_log: true
+
+    - name: Validar estado final
+      ansible.builtin.assert:
+        that:
+          - "'mongo1:27017 | PRIMARY | health=1' in final_status.stdout"
+          - "'mongo2:27017 | SECONDARY | health=1' in final_status.stdout"
+          - "'mongo3:27017 | SECONDARY | health=1' in final_status.stdout"
+        fail_msg: "ERROR: El Replica Set no termino en el estado esperado."
+        success_msg: "OK: Replica Set recuperado completamente."
+
+    # ============================================================
+    # 9. LIMPIEZA FINAL DE CONTENEDORES ANTIGUOS
+    # ============================================================
+
+    - name: Limpiar contenedores detenidos antiguos de mongo1 al finalizar
+      ansible.builtin.shell:
+        cmd: |
+          OLD_CONTAINERS=$(docker ps -aq \
+            --filter "label=com.docker.swarm.service.name=mongo1" \
+            --filter "status=exited")
+
+          if [ -n "$OLD_CONTAINERS" ]; then
+            docker rm $OLD_CONTAINERS
+          fi
+      register: final_cleanup
+      changed_when: final_cleanup.stdout | trim != ""
+      failed_when: false
+
+    # ============================================================
+    # 10. RESULTADO FINAL
+    # ============================================================
+
+    - name: Resultado final
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "PRUEBA COMPLETA DE ALTA DISPONIBILIDAD MONGODB V2"
+          - "============================================================"
+          - ""
+          - "[OK] PRIMARY inicial: {{ initial_primary.stdout | trim }}"
+          - "[OK] mongo1 detenido mediante scale=0"
+          - "[OK] Servicio mongo1 conservado"
+          - "[OK] Failover automatico realizado"
+          - "[OK] PRIMARY durante falla: {{ failover_primary.stdout | trim }}"
+          - "[OK] Escritura realizada durante la falla"
+          - "[OK] Documento: escritura_durante_failover"
+          - "[OK] mongo1 recuperado mediante scale=1"
+          - "[OK] Documento sincronizado hacia mongo1"
+          - "[OK] mongo1 recupero PRIMARY por prioridad"
+          - "[OK] PRIMARY final: {{ final_primary.stdout | trim }}"
+          - "[OK] Contenedores antiguos de mongo1 limpiados"
+          - ""
+          - "Estado final:"
+          - "{{ final_status.stdout | trim }}"
+          - ""
+          - "============================================================"
+          - "REPLICACION + FAILOVER + FAILBACK VALIDADOS"
+          - "============================================================"

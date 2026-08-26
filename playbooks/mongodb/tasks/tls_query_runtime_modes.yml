@@ -1,0 +1,76 @@
+---
+- name: Inicializar clasificacion TLS runtime
+  ansible.builtin.set_fact:
+    mongo_tls_runtime_modes: {}
+    mongo_tls_runtime_mode_details: {}
+
+- name: Consultar TLS runtime real en {{ item }}
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - "{{ mongo_network }}"
+      - --env
+      - MONGO_ADMIN_USER
+      - --env
+      - MONGO_ADMIN_PASSWORD
+      - "{{ mongo_image }}"
+      - mongosh
+      - --quiet
+      - --nodb
+      - --eval
+      - |
+          const user = process.env.MONGO_ADMIN_USER;
+          const pass = process.env.MONGO_ADMIN_PASSWORD;
+          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@{{ item }}:27017/admin?directConnection=true&serverSelectionTimeoutMS=5000`;
+          let result;
+          try {
+            const db = connect(uri);
+            const opts = db.adminCommand({getCmdLineOpts: 1}).parsed;
+            const rawMode = opts.net?.tls?.mode;
+            let classification = 'unknown';
+            if (rawMode === undefined || rawMode === null || rawMode === '' || rawMode === 'disabled') {
+              classification = 'disabled';
+            } else if (rawMode === 'allowTLS') {
+              classification = 'allowTLS';
+            }
+            result = {node: '{{ item }}', classification, tlsMode: rawMode ?? null};
+          } catch (err) {
+            result = {node: '{{ item }}', classification: 'unknown', tlsMode: null};
+          }
+          print('TLS_RUNTIME_JSON=' + JSON.stringify(result));
+  environment:
+    MONGO_ADMIN_USER: "{{ mongo_admin_user }}"
+    MONGO_ADMIN_PASSWORD: "{{ mongo_admin_password }}"
+  loop: "{{ mongo_tls_service_names }}"
+  register: mongo_tls_runtime_query_raw
+  changed_when: false
+  no_log: true
+
+- name: Interpretar TLS runtime real por nodo
+  ansible.builtin.set_fact:
+    mongo_tls_runtime_modes: >-
+      {{
+        mongo_tls_runtime_modes | combine({
+          item.item: runtime_result.classification
+        })
+      }}
+    mongo_tls_runtime_mode_details: >-
+      {{
+        mongo_tls_runtime_mode_details | combine({
+          item.item: runtime_result
+        })
+      }}
+  vars:
+    runtime_result: >-
+      {{
+        (item.stdout_lines
+         | select('match', '^TLS_RUNTIME_JSON=') | first
+         | regex_replace('^TLS_RUNTIME_JSON=', '')) | from_json
+      }}
+  loop: "{{ mongo_tls_runtime_query_raw.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+  no_log: true

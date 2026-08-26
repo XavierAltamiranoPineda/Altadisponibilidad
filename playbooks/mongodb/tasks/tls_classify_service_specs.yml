@@ -1,0 +1,87 @@
+---
+# Espera mongo_tls_service_inspects como lista de docker service inspect.
+- name: Inicializar clasificacion estructural de ServiceSpecs
+  ansible.builtin.set_fact:
+    mongo_tls_classified_spec_modes: {}
+
+- name: Clasificar ServiceSpec por estructura permanente
+  ansible.builtin.set_fact:
+    mongo_tls_classified_spec_modes: >-
+      {{
+        mongo_tls_classified_spec_modes | combine({
+          node: (
+            'permanent_allowtls' if (
+              permanent_wrapper and
+              container_args[-2] == 'allowTLS' and
+              container_args[-1] == node and
+              has_control_mount and
+              has_keyfile and
+              has_tls_ca and
+              has_node_pem and
+              has_tls_tmpfs and
+              not has_foreign_node_pem
+            ) else (
+              'permanent_disabled' if (
+                permanent_wrapper and
+                container_args[-2] == 'disabled' and
+                container_args[-1] == node and
+                has_control_mount and
+                has_keyfile and
+                not has_tls_ca and
+                not has_any_node_pem and
+                not has_tls_tmpfs
+              ) else (
+                'historical_disabled' if (
+                  command != ['/bin/sh'] and
+                  not has_control_mount and
+                  not has_tls_ca and
+                  not has_any_node_pem and
+                  not has_tls_tmpfs and
+                  not has_tls_mode_argument
+                ) else 'unknown'
+              )
+            )
+          )
+        })
+      }}
+  vars:
+    node: "{{ item.Spec.Name }}"
+    container_spec: "{{ item.Spec.TaskTemplate.ContainerSpec }}"
+    command: "{{ container_spec.Command | default([]) }}"
+    container_args: "{{ container_spec.Args | default([]) }}"
+    mounts: "{{ container_spec.Mounts | default([]) }}"
+    secrets: "{{ container_spec.Secrets | default([]) }}"
+    mount_targets: "{{ mounts | map(attribute='Target') | list }}"
+    secret_names: "{{ secrets | map(attribute='SecretName') | list }}"
+    permanent_wrapper: >-
+      {{ command == ['/bin/sh'] and (container_args | length >= 8) }}
+    has_control_mount: >-
+      {{ mount_targets | select('equalto', '/run/tls-control') | list | length > 0 }}
+    has_tls_tmpfs: >-
+      {{
+        mounts
+        | selectattr('Type', 'equalto', 'tmpfs')
+        | selectattr('Target', 'equalto', '/run/mongo-tls')
+        | list | length > 0
+      }}
+    has_keyfile: >-
+      {{ secret_names | select('equalto', 'mongo_keyfile') | list | length > 0 }}
+    has_tls_ca: >-
+      {{ secret_names | select('match', '^mongo_tls_ca_') | list | length > 0 }}
+    has_node_pem: >-
+      {{ secret_names | select('match', '^' ~ node ~ '_tls_pem_') | list | length > 0 }}
+    has_any_node_pem: >-
+      {{ secret_names | select('match', '^mongo[123]_tls_pem_') | list | length > 0 }}
+    # PEM de un nodo distinto mezclado en esta spec => spec corrupta => unknown
+    has_foreign_node_pem: >-
+      {{
+        (secret_names
+         | select('match', '^mongo[123]_tls_pem_')
+         | reject('match', '^' ~ node ~ '_tls_pem_')
+         | list | length) > 0
+      }}
+    has_tls_mode_argument: >-
+      {{ '--tlsMode' in (container_args | join(' ')) }}
+  loop: "{{ mongo_tls_service_inspects }}"
+  loop_control:
+    label: "{{ item.Spec.Name }}"

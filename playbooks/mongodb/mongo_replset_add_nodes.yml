@@ -1,0 +1,200 @@
+---
+- name: Agregar nodos al Replica Set MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    mongo_service: "mongo1"
+    mongo_replset: "rs0"
+
+    mongo_nodes:
+      - "mongo2:27017"
+      - "mongo3:27017"
+
+  tasks:
+
+    # ============================================================
+    # 1. OBTENER CONTENEDOR PRIMARY
+    # ============================================================
+
+    - name: Obtener contenedor de mongo1
+      ansible.builtin.shell:
+        cmd: docker ps -q --filter name=mongo1
+      register: mongo1_container
+      changed_when: false
+
+    - name: Validar contenedor mongo1
+      ansible.builtin.assert:
+        that:
+          - mongo1_container.stdout | trim != ""
+        fail_msg: "ERROR: No se encontró el contenedor mongo1."
+        success_msg: "OK: Contenedor mongo1 encontrado."
+
+    # ============================================================
+    # 2. VERIFICAR REPLICA SET
+    # ============================================================
+
+    - name: Consultar estado actual del Replica Set
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "rs.status().set"
+      register: replset_status
+      changed_when: false
+      no_log: true
+
+    - name: Validar Replica Set
+      ansible.builtin.assert:
+        that:
+          - replset_status.stdout | trim == mongo_replset
+        fail_msg: "ERROR: El Replica Set no es {{ mongo_replset }}."
+        success_msg: "OK: Replica Set {{ mongo_replset }} disponible."
+
+    # ============================================================
+    # 3. VERIFICAR QUE MONGO1 SEA PRIMARY
+    # ============================================================
+
+    - name: Consultar estado del nodo PRIMARY
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "rs.status().myState"
+      register: mongo1_state
+      changed_when: false
+      no_log: true
+
+    - name: Validar PRIMARY
+      ansible.builtin.assert:
+        that:
+          - mongo1_state.stdout | trim == "1"
+        fail_msg: "ERROR: mongo1 no está en estado PRIMARY."
+        success_msg: "OK: mongo1 es PRIMARY."
+
+    # ============================================================
+    # 4. OBTENER MIEMBROS ACTUALES
+    # ============================================================
+
+    - name: Obtener miembros actuales del Replica Set
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "rs.conf().members.map(m => m.host).join('\n')"
+      register: current_members
+      changed_when: false
+      no_log: true
+
+    # ============================================================
+    # 5. AGREGAR MONGO2 Y MONGO3
+    # ============================================================
+
+    - name: Agregar nodos al Replica Set
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "rs.add('{{ item }}')"
+      loop: "{{ mongo_nodes }}"
+      when: item not in current_members.stdout
+      register: add_node_result
+      changed_when: true
+      no_log: true
+
+    # ============================================================
+    # 6. ESPERAR SINCRONIZACIÓN
+    # ============================================================
+
+    - name: Esperar estabilización del Replica Set
+      ansible.builtin.pause:
+        seconds: 15
+
+    # ============================================================
+    # 7. CONSULTAR ESTADO FINAL
+    # ============================================================
+
+    - name: Consultar miembros finales
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "rs.status().members.map(m => m.name + ' | ' + m.stateStr + ' | health=' + m.health).join('\n')"
+      register: final_members
+      changed_when: false
+      no_log: true
+
+    # ============================================================
+    # 8. OBTENER CANTIDAD DE MIEMBROS
+    # ============================================================
+
+    - name: Obtener cantidad de miembros
+      ansible.builtin.command:
+        cmd: >
+          docker exec {{ mongo1_container.stdout | trim }}
+          mongosh --quiet
+          --username {{ mongo_admin_user }}
+          --password {{ mongo_admin_password }}
+          --authenticationDatabase admin
+          --eval "rs.status().members.length"
+      register: member_count
+      changed_when: false
+      no_log: true
+
+    # ============================================================
+    # 9. VALIDAR TRES MIEMBROS
+    # ============================================================
+
+    - name: Validar Replica Set de 3 nodos
+      ansible.builtin.assert:
+        that:
+          - member_count.stdout | trim == "3"
+        fail_msg: "ERROR: El Replica Set no tiene 3 miembros."
+        success_msg: "OK: Replica Set compuesto por 3 miembros."
+
+    # ============================================================
+    # 10. MOSTRAR RESULTADO
+    # ============================================================
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "        REPLICA SET MONGODB V2"
+          - "============================================================"
+          - ""
+          - "[OK] Replica Set: {{ mongo_replset }}"
+          - "[OK] PRIMARY: mongo1:27017"
+          - "[OK] Nodo secundario: mongo2:27017"
+          - "[OK] Nodo secundario: mongo3:27017"
+          - "[OK] Total de miembros: {{ member_count.stdout | trim }}"
+          - "[OK] Autenticación mediante usuario administrador"
+          - "[OK] KeyFile compartido mediante Docker Secret"
+          - ""
+          - "Estado:"
+          - "{{ final_members.stdout | trim }}"
+          - ""
+          - "============================================================"
+          - "        REPLICA SET CONFIGURADO"
+          - "============================================================"
+

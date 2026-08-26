@@ -1,0 +1,57 @@
+---
+# ============================================================
+# AMBIENTE PRODUCCION
+# ============================================================
+
+environment_name: "production"
+
+# ============================================================
+# TLS PRODUCCION - PKI PROPORCIONADA POR INFRAESTRUCTURA
+# ============================================================
+
+mongo_tls_enabled: "{{ production_mongo_tls_enabled }}"
+mongo_tls_clients_enabled: "{{ production_mongo_tls_clients_enabled }}"
+mongo_tls_target_mode: "{{ production_mongo_tls_target_mode }}"
+mongo_tls_deployment_mode: "{{ production_mongo_tls_deployment_mode }}"
+
+mongo_tls_provisioning_source: "pki_provided"
+mongo_tls_secret_version: "{{ production_mongo_tls_secret_version }}"
+mongo_tls_ca_secret_version: "{{ production_mongo_tls_ca_secret_version }}"
+mongo_tls_node_secret_version: "{{ production_mongo_tls_node_secret_version }}"
+
+mongo_tls_ca_cert_path: "{{ production_mongo_tls_ca_cert_path }}"
+mongo_tls_nodes_certificates: "{{ production_mongo_tls_nodes_certificates }}"
+
+# Estos valores deben ser definidos por infraestructura
+mongo_database: "{{ production_mongo_database }}"
+
+# URI de conexion para respaldo en produccion con Replica Set (HA)
+mongo_backup_uri: "{{ production_mongo_backup_uri }}"
+
+# Red de contenedores o infraestructura en produccion
+mongo_backup_network: "{{ production_mongo_backup_network }}"
+
+# Imagen Docker dedicada para las herramientas de respaldo
+mongo_backup_tools_image: "{{ production_mongo_backup_tools_image | default('mongo-backup-tools:100.18.0') }}"
+
+# Imagen base del contenedor para Database Tools en produccion
+mongodb_tools_container_base_image: "{{ production_mongodb_tools_container_base_image | default('ubuntu:24.04') }}"
+
+# Servicios MongoDB para trazabilidad en produccion
+mongo_trace_services: "{{ production_mongo_trace_services }}"
+
+# Plataforma de herramientas para produccion
+mongodb_tools_platform: "{{ production_mongodb_tools_platform | default('ubuntu2404') }}"
+mongodb_tools_arch: "{{ production_mongodb_tools_arch | default('x86_64') }}"
+
+# Ruta de respaldo para produccion
+backup_root: "{{ production_backup_repository }}"
+
+# Ruta de logs
+backup_log_root: "{{ production_backup_log_root }}"
+
+# Ruta del archivo de password de Vault para ejecucion no interactiva (Cron)
+ansible_vault_password_file: "{{ production_ansible_vault_password_file }}"
+
+# La herramienta definitiva sera definida institucionalmente
+backup_scheduler: "{{ production_backup_scheduler | default('cron') }}"

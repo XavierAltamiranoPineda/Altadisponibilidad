@@ -1,0 +1,77 @@
+---
+- name: Crear infraestructura de red Docker Swarm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    mongo_network: "mongo_swarm_net"
+
+  tasks:
+
+    # ==========================================================
+    # 1. VERIFICAR SWARM
+    # ==========================================================
+
+    - name: Verificar estado de Docker Swarm
+      ansible.builtin.command:
+        cmd: docker info --format "{{ '{{.Swarm.LocalNodeState}}' }}"
+      register: swarm_state
+      changed_when: false
+
+    - name: Verificar que Swarm está activo
+      ansible.builtin.assert:
+        that:
+          - swarm_state.stdout | trim == "active"
+        fail_msg: "Docker Swarm no está activo."
+        success_msg: "Docker Swarm está activo."
+
+    # ==========================================================
+    # 2. CREAR RED OVERLAY
+    # ==========================================================
+
+    - name: Verificar si existe la red MongoDB
+      ansible.builtin.command:
+        cmd: docker network inspect {{ mongo_network }}
+      register: network_check
+      failed_when: false
+      changed_when: false
+
+    - name: Crear red Overlay para MongoDB
+      ansible.builtin.command:
+        cmd: >
+          docker network create
+          --driver overlay
+          --attachable
+          {{ mongo_network }}
+      when: network_check.rc != 0
+
+    # ==========================================================
+    # 3. VERIFICAR RED
+    # ==========================================================
+
+    - name: Obtener información de la red
+      ansible.builtin.command:
+        cmd: docker network inspect {{ mongo_network }}
+      register: network_info
+      changed_when: false
+
+    # ==========================================================
+    # 4. MOSTRAR RESULTADO
+    # ==========================================================
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "        INFRAESTRUCTURA DE RED - V2"
+          - "============================================================"
+          - ""
+          - "[OK] Docker Swarm activo"
+          - "[OK] Red MongoDB disponible"
+          - "Red: {{ mongo_network }}"
+          - "Driver: overlay"
+          - "Attachable: true"
+          - ""
+          - "============================================================"

@@ -1,0 +1,2 @@
+2026-08-24T13:39:30-05:00 | environment=local | source_database=prueba_ha | restore_database=prueba_ha_restore_test | backup_file=prueba_ha_20260824_130507.archive.gz | checksum=OK | duration_seconds=9 | responsible=Ricardo | result=FAILED
+2026-08-24T13:41:11-05:00 | environment=local | source_database=prueba_ha | restore_database=prueba_ha_restore_test | backup_file=prueba_ha_20260824_130507.archive.gz | checksum=OK | duration_seconds=12 | responsible=Ricardo Altamirano | result=SUCCESS

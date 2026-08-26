@@ -1,0 +1,160 @@
+---
+- name: Crear usuario de respaldo MongoDB
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  tasks:
+
+    - name: Buscar un contenedor MongoDB activo
+      ansible.builtin.shell: |
+        for service in mongo1 mongo2 mongo3; do
+          container=$(docker ps \
+            --filter "label=com.docker.swarm.service.name=${service}" \
+            --format '{{"{{"}}.ID{{"}}"}}' | head -n1)
+
+          if [ -n "$container" ]; then
+            echo "$container"
+            exit 0
+          fi
+        done
+        exit 1
+      register: mongo_available_container
+      changed_when: false
+
+    - name: Obtener PRIMARY actual del Replica Set
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          {{ mongo_available_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "db.hello().primary"
+          '
+      register: mongo_primary
+      changed_when: false
+      no_log: true
+
+    - name: Mostrar PRIMARY detectado
+      ansible.builtin.debug:
+        msg: "[OK] PRIMARY detectado: {{ mongo_primary.stdout }}"
+
+    - name: Obtener servicio correspondiente al PRIMARY
+      ansible.builtin.set_fact:
+        mongo_primary_service: "{{ mongo_primary.stdout.split(':')[0] }}"
+
+    - name: Obtener contenedor del PRIMARY
+      ansible.builtin.shell: |
+        docker ps \
+          --filter "label=com.docker.swarm.service.name={{ mongo_primary_service }}" \
+          --format '{{"{{"}}.ID{{"}}"}}' | head -n1
+      register: mongo_primary_container
+      changed_when: false
+
+    - name: Crear o actualizar usuario de backup con minimo privilegio
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_ADMIN_USER='{{ mongo_admin_user }}' \
+          -e MONGO_ADMIN_PASSWORD='{{ mongo_admin_password }}' \
+          -e MONGO_BACKUP_USER='{{ mongo_backup_user }}' \
+          -e MONGO_BACKUP_PASSWORD='{{ mongo_backup_password }}' \
+          -e MONGO_BACKUP_DATABASE='{{ mongo_database }}' \
+          {{ mongo_primary_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_ADMIN_USER" \
+              --password "$MONGO_ADMIN_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "
+                const adminDB = db.getSiblingDB(\"admin\");
+                const existing = adminDB.getUser(\"$MONGO_BACKUP_USER\");
+
+                if (!existing) {
+                  adminDB.createUser({
+                    user: \"$MONGO_BACKUP_USER\",
+                    pwd: \"$MONGO_BACKUP_PASSWORD\",
+                    roles: [
+                      { role: \"read\", db: \"$MONGO_BACKUP_DATABASE\" }
+                    ]
+                  });
+                  print(\"CREATED\");
+                } else {
+                  adminDB.updateUser(
+                    \"$MONGO_BACKUP_USER\",
+                    {
+                      pwd: \"$MONGO_BACKUP_PASSWORD\",
+                      roles: [
+                        { role: \"read\", db: \"$MONGO_BACKUP_DATABASE\" }
+                      ]
+                    }
+                  );
+                  print(\"UPDATED\");
+                }
+              "
+          '
+      register: backup_user_result
+      changed_when: true
+      no_log: true
+
+    - name: Validar autenticacion y permisos de lectura del usuario de backup
+      ansible.builtin.shell: |
+        docker exec \
+          -e MONGO_BACKUP_USER='{{ mongo_backup_user }}' \
+          -e MONGO_BACKUP_PASSWORD='{{ mongo_backup_password }}' \
+          -e MONGO_BACKUP_DATABASE='{{ mongo_database }}' \
+          {{ mongo_primary_container.stdout }} \
+          sh -c '
+            mongosh \
+              --quiet \
+              --host 127.0.0.1 \
+              --port 27017 \
+              --username "$MONGO_BACKUP_USER" \
+              --password "$MONGO_BACKUP_PASSWORD" \
+              --authenticationDatabase admin \
+              --eval "
+                try {
+                  const targetDB = db.getSiblingDB(\"$MONGO_BACKUP_DATABASE\");
+                  const pingRes = targetDB.runCommand({ ping: 1 });
+                  if (pingRes.ok !== 1) quit(1);
+                  const collections = targetDB.getCollectionNames();
+                  print(\"READ_OK:\" + collections.length);
+                } catch (err) {
+                  print(\"ERROR:\" + err.message);
+                  quit(1);
+                }
+              "
+          '
+      register: backup_auth_validation
+      changed_when: false
+      no_log: true
+
+    - name: Confirmar usuario y permisos de lectura de backup
+      ansible.builtin.assert:
+        that:
+          - backup_auth_validation.rc == 0
+          - "'READ_OK' in backup_auth_validation.stdout"
+        fail_msg: "[ERROR] El usuario de backup no pudo autenticarse o no tiene permisos de lectura sobre {{ mongo_database }}"
+        success_msg: "[OK] Autenticacion y permisos de lectura validados sobre {{ mongo_database }}"
+
+    - name: Confirmar usuario de backup
+      ansible.builtin.debug:
+        msg:
+          - "[OK] Usuario de backup configurado"
+          - "[OK] Base autorizada: {{ mongo_database }}"
+          - "[OK] Permisos de lectura validados"
+          - "[OK] Principio de minimo privilegio aplicado"

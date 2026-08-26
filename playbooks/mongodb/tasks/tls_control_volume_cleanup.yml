@@ -1,0 +1,59 @@
+---
+# ============================================================
+# Limpieza segura y verificada de archivos de control
+# ============================================================
+
+- name: Evaluar si el cleanup es seguro segun la fase final
+  ansible.builtin.set_fact:
+    mongo_tls_cleanup_safe: >-
+      {{
+        (mongo_tls_final_phase | default('UNKNOWN')) in ['SUCCESS', 'FAILED_ROLLED_BACK'] or
+        (mongo_tls_force_cleanup | default(false) | bool)
+      }}
+
+- name: Limpiar control volumes cuando la fase es segura
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ mongo_tls_control_volume_names[item] }}:/ctrl:rw"
+      - "{{ mongo_image }}"
+      - sh
+      - -c
+      - "rm -f /ctrl/operation-active /ctrl/operation-start /ctrl/.operation-active.tmp && echo CLEANED"
+  loop: "{{ mongo_tls_service_names }}"
+  when: mongo_tls_cleanup_safe | bool
+  register: mongo_tls_clean_exec_raw
+  changed_when: "'CLEANED' in mongo_tls_clean_exec_raw.stdout"
+
+- name: Verificar que todos los volumenes quedaron completamente limpios
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - -v
+      - "{{ mongo_tls_control_volume_names[item] }}:/ctrl:ro"
+      - "{{ mongo_image }}"
+      - sh
+      - -c
+      - |
+        test ! -e /ctrl/operation-active && test ! -e /ctrl/operation-start && test ! -e /ctrl/.operation-active.tmp && echo "VERIFIED_CLEAN" || exit 1
+  loop: "{{ mongo_tls_service_names }}"
+  when: mongo_tls_cleanup_safe | bool
+  register: mongo_tls_clean_verify_raw
+  changed_when: false
+
+- name: Registrar cleanup verificado
+  ansible.builtin.set_fact:
+    mongo_tls_cleanup_verified: true
+  when: mongo_tls_cleanup_safe | bool
+
+- name: Preservar evidencia si la fase no permite cleanup automatico
+  ansible.builtin.debug:
+    msg: >
+      CLEANUP_SKIPPED: phase={{ mongo_tls_final_phase | default('UNKNOWN') }}.
+      Archivos de control preservados como evidencia fail-closed.
+  when: not (mongo_tls_cleanup_safe | bool)

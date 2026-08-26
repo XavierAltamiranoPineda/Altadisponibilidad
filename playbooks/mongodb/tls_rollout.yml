@@ -1,0 +1,540 @@
+---
+# ============================================================
+# ORQUESTACION SEGURA DE TRANSICION TLS PARA MONGODB (ETAPA 3)
+# Implementa GATED_RESTART con dos specs permanentes
+# ============================================================
+
+- name: Rollout transaccional y validado de TLS en MongoDB
+  hosts: localhost
+  gather_facts: true
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/{{ target_environment | default('local') }}.yml"
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+  vars:
+    mongo_tls_service_names:
+      - mongo1
+      - mongo2
+      - mongo3
+    mongo_network: "mongo_swarm_net"
+    mongo_tls_expected_mode: "{{ target_tls_mode | default('allowTLS') }}"
+    mongo_tls_local_vars_path: "{{ playbook_dir }}/../../vars/{{ target_environment | default('local') }}.yml"
+    backup_lock_path: "{{ backup_log_root | default('logs') }}/{{ backup_lock_filename | default('mongodb_backup.lock') }}"
+    tls_rollout_state_path: "{{ backup_log_root | default('logs') }}/tls_rollout_state.json"
+
+  tasks:
+    # ── MODO RECOVERY AUTOMATIZADO (ESTRICTAMENTE TERMINAL) ───────────────────
+    - name: Modo Recovery — Evaluacion y diagnostico de cluster
+      when: force_recovery | default(false) | bool
+      block:
+        - name: Cargar state file anterior en recovery
+          ansible.builtin.set_fact:
+            mongo_tls_rec_state: "{{ lookup('file', tls_rollout_state_path) | from_json }}"
+          failed_when: false
+
+        - name: Inspeccionar specs de los 3 servicios en recovery
+          ansible.builtin.command:
+            argv: [docker, service, inspect, mongo1, mongo2, mongo3]
+          register: mongo_tls_rec_specs_raw
+          changed_when: false
+
+        - name: Clasificar specs de recovery con el helper unico
+          ansible.builtin.include_tasks: tasks/tls_classify_service_specs.yml
+          vars:
+            mongo_tls_service_inspects: "{{ mongo_tls_rec_specs_raw.stdout | from_json }}"
+
+        - name: Registrar clasificacion exacta de specs en recovery
+          ansible.builtin.set_fact:
+            mongo_tls_rec_spec_modes: "{{ mongo_tls_classified_spec_modes }}"
+
+        - name: Consultar runtime real por nodo con el helper comun
+          ansible.builtin.include_tasks: tasks/tls_query_runtime_modes.yml
+
+        - name: Registrar clasificacion TLS runtime en recovery
+          ansible.builtin.set_fact:
+            mongo_tls_rec_runtime_modes: "{{ mongo_tls_runtime_modes }}"
+
+        - name: Consultar Replica Set en recovery
+          ansible.builtin.include_tasks: tasks/tls_query_cluster.yml
+          vars:
+            mongo_tls_cluster_retries: 10
+            mongo_tls_cluster_delay: 2
+
+        - name: Evaluar homogeneidad del cluster para recovery
+          ansible.builtin.set_fact:
+            mongo_tls_rec_specs_all_allowtls: "{{ mongo_tls_rec_spec_modes.values() | select('equalto', 'permanent_allowtls') | list | length == 3 }}"
+            mongo_tls_rec_specs_all_disabled: "{{ mongo_tls_rec_spec_modes.values() | select('equalto', 'permanent_disabled') | list | length == 3 }}"
+            mongo_tls_rec_runtime_all_allowtls: "{{ mongo_tls_rec_runtime_modes.values() | select('equalto', 'allowTLS') | list | length == 3 }}"
+            mongo_tls_rec_runtime_all_disabled: "{{ mongo_tls_rec_runtime_modes.values() | select('equalto', 'disabled') | list | length == 3 }}"
+
+        - name: Diagnostico Recovery
+          ansible.builtin.debug:
+            msg:
+              phase_anterior: "{{ mongo_tls_rec_state.phase | default('UNKNOWN') }}"
+              spec_modes: "{{ mongo_tls_rec_spec_modes }}"
+              runtime_modes: "{{ mongo_tls_rec_runtime_modes }}"
+              rs_healthy: "{{ mongo_tls_cluster_status.healthy }}"
+              confirm_required: "confirm_recovery_cleanup=true"
+
+        # RAMA A: HOMOGENEOUS_ALLOWTLS
+        - name: Recovery — Homogeneous allowTLS confirmado
+          when:
+            - mongo_tls_cluster_status.healthy | bool
+            - mongo_tls_rec_specs_all_allowtls | bool
+            - mongo_tls_rec_runtime_all_allowtls | bool
+          block:
+            - name: Ejecutar cleanup de recovery allowTLS
+              when: confirm_recovery_cleanup | default(false) | bool
+              block:
+                - name: Limpiar control volumes en recovery
+                  ansible.builtin.include_tasks: tasks/tls_control_volume_cleanup.yml
+                  vars:
+                    mongo_tls_force_cleanup: true
+
+                - name: Sincronizar vars/local.yml a allowTLS
+                  ansible.builtin.copy:
+                    dest: "{{ mongo_tls_local_vars_path }}"
+                    mode: "0644"
+                    content: >-
+                      {{
+                        lookup('ansible.builtin.file', mongo_tls_local_vars_path, rstrip=false)
+                        | regex_replace('(?m)^mongo_tls_enabled:.*$', 'mongo_tls_enabled: true')
+                        | regex_replace('(?m)^mongo_tls_clients_enabled:.*$', 'mongo_tls_clients_enabled: false')
+                        | regex_replace('(?m)^mongo_tls_target_mode:.*$', 'mongo_tls_target_mode: "requireTLS"')
+                        | regex_replace('(?m)^mongo_tls_deployment_mode:.*$', 'mongo_tls_deployment_mode: "allowTLS"')
+                      }}
+
+                - name: Marcar estado SUCCESS en recovery allowTLS
+                  ansible.builtin.set_fact:
+                    mongo_tls_current_phase: "SUCCESS"
+                    mongo_tls_needs_manual_recovery: false
+
+                - name: Persistir state file en recovery
+                  ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+                - name: Finalizar recovery exitoso allowTLS
+                  ansible.builtin.meta: end_play
+
+            - name: Finalizar recovery allowTLS no confirmado
+              ansible.builtin.fail:
+                msg: "Recovery allowTLS requiere confirm_recovery_cleanup=true para aplicar cleanup."
+              when: not (confirm_recovery_cleanup | default(false) | bool)
+
+        # RAMA B: HOMOGENEOUS_DISABLED
+        - name: Recovery — Homogeneous disabled confirmado
+          when:
+            - mongo_tls_cluster_status.healthy | bool
+            - mongo_tls_rec_specs_all_disabled | bool
+            - mongo_tls_rec_runtime_all_disabled | bool
+          block:
+            - name: Ejecutar cleanup de recovery disabled
+              when: confirm_recovery_cleanup | default(false) | bool
+              block:
+                - name: Limpiar control volumes en recovery disabled
+                  ansible.builtin.include_tasks: tasks/tls_control_volume_cleanup.yml
+                  vars:
+                    mongo_tls_force_cleanup: true
+
+                - name: Marcar estado FAILED_ROLLED_BACK en recovery disabled
+                  ansible.builtin.set_fact:
+                    mongo_tls_current_phase: "FAILED_ROLLED_BACK"
+                    mongo_tls_needs_manual_recovery: false
+
+                - name: Persistir state file en recovery
+                  ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+                - name: Finalizar recovery exitoso disabled
+                  ansible.builtin.meta: end_play
+
+            - name: Finalizar recovery disabled no confirmado
+              ansible.builtin.fail:
+                msg: "Recovery disabled requiere confirm_recovery_cleanup=true para aplicar cleanup."
+              when: not (confirm_recovery_cleanup | default(false) | bool)
+
+        # RAMA C: MIXED / UNKNOWN / UNHEALTHY
+        - name: Marcar recovery como NEEDS_MANUAL_RECOVERY
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "NEEDS_MANUAL_RECOVERY"
+            mongo_tls_needs_manual_recovery: true
+            mongo_tls_node_spec_status: "{{ mongo_tls_rec_spec_modes }}"
+            mongo_tls_error_reason: >-
+              RECOVERY_INVALID_FINAL_STATE: specs={{ mongo_tls_rec_spec_modes }},
+              runtime={{ mongo_tls_rec_runtime_modes }},
+              healthy={{ mongo_tls_cluster_status.healthy }}
+
+        - name: Persistir NEEDS_MANUAL_RECOVERY
+          ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+        - name: Abortar por estado heterogeneo o no saludable
+          ansible.builtin.fail:
+            msg: >
+              RECOVERY ABORT: Cluster heterogeneo o no saludable.
+              Spec modes: {{ mongo_tls_rec_spec_modes }},
+              Runtime modes: {{ mongo_tls_rec_runtime_modes }},
+              RS Healthy: {{ mongo_tls_cluster_status.healthy }}.
+              Se requiere intervencion manual experta.
+
+    # ── SAFETY GUARD ─────────────────────────────────────────────────────────
+    - name: Safety Guard — Impedir caida al rollout normal desde recovery
+      ansible.builtin.assert:
+        that:
+          - not (force_recovery | default(false) | bool)
+        fail_msg: "FATAL: force_recovery activo llego al flujo normal de rollout."
+
+    # ── FASE 0: PRECHECK ─────────────────────────────────────────────────────
+    # ── EVALUACION DE ESTADO ANTERIOR ───────────────────────────────────────
+    # Ejecutado ANTES de generar rollout_id/operation_id nuevo, de crear
+    # control volumes o de sobrescribir el state file. Garantiza que si el
+    # intento anterior murio en fase intermedia, se demuestra la ausencia de
+    # mutacion antes de permitir un nuevo rollout limpio.
+
+    - name: ESTADO ANTERIOR — Stat del state file
+      ansible.builtin.stat:
+        path: "{{ tls_rollout_state_path }}"
+      register: mongo_tls_prev_state_stat
+
+    - name: ESTADO ANTERIOR — Cargar si existe
+      ansible.builtin.set_fact:
+        mongo_tls_previous_state: "{{ lookup('file', tls_rollout_state_path) | from_json }}"
+      when: mongo_tls_prev_state_stat.stat.exists
+
+    - name: ESTADO ANTERIOR — Asignar vacio si no existe
+      ansible.builtin.set_fact:
+        mongo_tls_previous_state: { phase: 'NONE', rollout_id: '' }
+      when: not mongo_tls_prev_state_stat.stat.exists
+
+    - name: ESTADO ANTERIOR — Detectar si la fase anterior es terminal o intermedia
+      ansible.builtin.set_fact:
+        mongo_tls_prev_phase_is_terminal: >-
+          {{
+            mongo_tls_previous_state.phase | default('NONE')
+            in ['NONE', 'SUCCESS', 'FAILED_ROLLED_BACK', 'ABORTED_PRE_MUTATION', 'NEEDS_MANUAL_RECOVERY']
+          }}
+
+    # Propagar el rollout_id anterior ANTES del include para que tls_state_file.yml
+    # lo preserve en el registro ABORTED_PRE_MUTATION (auditoria de la ejecucion anterior).
+    # El nuevo rollout_id se genera en "Marcar fase PRECHECK" DESPUES de esta seccion.
+    - name: ESTADO ANTERIOR — Restaurar rollout_id anterior para auditoria
+      ansible.builtin.set_fact:
+        mongo_tls_rollout_id: "{{ mongo_tls_previous_state.rollout_id | default('unknown') }}"
+      when: not (mongo_tls_prev_phase_is_terminal | bool)
+
+    - name: ESTADO ANTERIOR — Ejecutar verificacion pre-mutacion si fase es intermedia
+      ansible.builtin.include_tasks: tasks/tls_precheck_pre_mutation.yml
+      when: not (mongo_tls_prev_phase_is_terminal | bool)
+      # Si TODAS las invariantes pasan:
+      #   - persiste ABORTED_PRE_MUTATION con el rollout_id anterior
+      #   - sets mongo_tls_precheck_decision = CONTINUE
+      # Si cualquier invariante falla:
+      #   - persiste NEEDS_MANUAL_RECOVERY y aborta el play
+
+    - name: ESTADO ANTERIOR — Abortar si state file registra NEEDS_MANUAL_RECOVERY
+      ansible.builtin.fail:
+        msg: >
+          ABORT: State file anterior indica NEEDS_MANUAL_RECOVERY.
+          No se puede iniciar un nuevo rollout sin resolver el estado anterior.
+          Usar force_recovery=true para recuperacion controlada.
+      when: mongo_tls_previous_state.phase | default('NONE') == 'NEEDS_MANUAL_RECOVERY'
+
+    # Calcular decision solo para fases terminales limpias (las intermedias
+    # ya establecieron mongo_tls_precheck_decision via tls_precheck_pre_mutation.yml).
+    - name: ESTADO ANTERIOR — Calcular decision de precheck para setup de control volumes
+      ansible.builtin.set_fact:
+        mongo_tls_precheck_decision: >-
+          {%- set prev_phase = mongo_tls_previous_state.phase | default('NONE') -%}
+          {%- if prev_phase in ['SUCCESS', 'FAILED_ROLLED_BACK', 'ABORTED_PRE_MUTATION'] -%}CLEANUP_AND_CONTINUE
+          {%- else -%}CONTINUE{%- endif -%}
+      when: mongo_tls_precheck_decision is not defined
+
+    - name: ESTADO ANTERIOR — Mostrar decision y fase anterior
+      ansible.builtin.debug:
+        msg:
+          previous_phase: "{{ mongo_tls_previous_state.phase | default('NONE') }}"
+          precheck_decision: "{{ mongo_tls_precheck_decision }}"
+
+    - name: Marcar fase PRECHECK
+      ansible.builtin.set_fact:
+        mongo_tls_current_phase: "PRECHECK"
+        mongo_tls_rollout_id: "{{ ansible_date_time.iso8601_basic_short }}-{{ 99999 | random | string }}"
+        mongo_tls_operation_id: "{{ ansible_date_time.iso8601_basic_short }}-fwd-{{ 99999 | random | string }}"
+        mongo_tls_operation_mode: "forward"
+        mongo_tls_source_mode: "{{ mongo_tls_deployment_mode }}"
+        mongo_tls_target_mode_expected: "{{ mongo_tls_expected_mode }}"
+        mongo_tls_needs_manual_recovery: false
+        mongo_tls_cleanup_verified: false
+        mongo_tls_gate_ready_nodes: {}
+        mongo_tls_gate_released_nodes: {}
+        mongo_tls_mongod_started_nodes: {}
+        mongo_tls_control_state_nodes: {}
+        mongo_tls_service_current_version: {}
+        mongo_tls_node_spec_status: {}
+
+    - name: Validar transicion de modo permitida (disabled -> allowTLS)
+      ansible.builtin.assert:
+        that:
+          - mongo_tls_deployment_mode == 'disabled'
+          - mongo_tls_expected_mode == 'allowTLS'
+        fail_msg: "Transicion {{ mongo_tls_deployment_mode }} -> {{ mongo_tls_expected_mode }} no permitida en Etapa 3."
+
+    - name: Validar disponibilidad de curl y Docker Engine API
+      ansible.builtin.command:
+        argv: [curl, --silent, --fail-with-body, --unix-socket, /var/run/docker.sock, "http://localhost/version"]
+      register: mongo_tls_docker_api_ver_raw
+      changed_when: false
+
+    - name: Validar version minima de Docker Engine API
+      ansible.builtin.assert:
+        that:
+          - (mongo_tls_docker_api_ver_raw.stdout | from_json).ApiVersion is version('1.40', '>=')
+        fail_msg: "Docker Engine API version menor a 1.40."
+
+    - name: Validar existencia de secretos TLS necesarios
+      ansible.builtin.command:
+        argv:
+          - docker
+          - secret
+          - inspect
+          - "{{ item }}"
+      loop:
+        - "mongo_keyfile"
+        - "mongo_tls_ca_{{ mongo_tls_ca_secret_version }}"
+        - "mongo1_tls_pem_{{ mongo_tls_node_secret_version }}"
+        - "mongo2_tls_pem_{{ mongo_tls_node_secret_version }}"
+        - "mongo3_tls_pem_{{ mongo_tls_node_secret_version }}"
+      register: mongo_tls_secrets_inspect_raw
+      changed_when: false
+
+    - name: Extraer IDs de secretos TLS para construcción de specs
+      ansible.builtin.set_fact:
+        mongo_tls_ca_secret_id: >-
+          {{
+            (mongo_tls_secrets_inspect_raw.results
+             | selectattr('item', 'equalto', 'mongo_tls_ca_' ~ mongo_tls_ca_secret_version)
+             | map(attribute='stdout') | first | from_json | first).ID
+          }}
+        mongo_tls_node_pem_secret_ids:
+          mongo1: >-
+            {{ (mongo_tls_secrets_inspect_raw.results | selectattr('item', 'equalto', 'mongo1_tls_pem_' ~ mongo_tls_node_secret_version) | map(attribute='stdout') | first | from_json | first).ID }}
+          mongo2: >-
+            {{ (mongo_tls_secrets_inspect_raw.results | selectattr('item', 'equalto', 'mongo2_tls_pem_' ~ mongo_tls_node_secret_version) | map(attribute='stdout') | first | from_json | first).ID }}
+          mongo3: >-
+            {{ (mongo_tls_secrets_inspect_raw.results | selectattr('item', 'equalto', 'mongo3_tls_pem_' ~ mongo_tls_node_secret_version) | map(attribute='stdout') | first | from_json | first).ID }}
+
+    - name: Validar ruta canonica de CA en el host para pruebas cliente
+      ansible.builtin.set_fact:
+        mongo_tls_ca_canonical: "{{ mongo_tls_ca_cert_path }}"
+
+    - name: Verificar archivo CA canonico en el host
+      ansible.builtin.stat:
+        path: "{{ mongo_tls_ca_canonical }}"
+      register: mongo_tls_ca_canonical_stat
+
+    - name: Asegurar archivo CA existente
+      ansible.builtin.assert:
+        that:
+          - mongo_tls_ca_canonical_stat.stat.exists
+        fail_msg: "Archivo CA canonico no encontrado en {{ mongo_tls_ca_canonical }}."
+
+    # ── FASE 1: LOCKED & SNAPSHOT ────────────────────────────────────────────
+    - name: Marcar fase LOCKED y SNAPSHOT
+      ansible.builtin.set_fact:
+        mongo_tls_current_phase: "SNAPSHOT"
+
+    - name: Detectar identidad runtime y construir wrapper permanente
+      ansible.builtin.include_tasks: tasks/tls_runtime_facts.yml
+
+    - name: Consultar snapshot de servicios y datos
+      ansible.builtin.include_tasks: tasks/tls_snapshot_services.yml
+
+    - name: Consultar snapshot de Replica Set
+      ansible.builtin.include_tasks: tasks/tls_query_cluster.yml
+
+    - name: Registrar snapshot inicial del Replica Set
+      ansible.builtin.set_fact:
+        mongo_tls_initial_cluster_status: "{{ mongo_tls_cluster_status }}"
+        mongo_tls_initial_primary: "{{ mongo_tls_cluster_status.primary }}"
+        mongo_tls_initial_secondaries: "{{ mongo_tls_cluster_status.secondaries }}"
+        mongo_tls_initial_services:
+          mongo1: "{{ mongo_tls_snapshot_services.mongo1.spec }}"
+          mongo2: "{{ mongo_tls_snapshot_services.mongo2.spec }}"
+          mongo3: "{{ mongo_tls_snapshot_services.mongo3.spec }}"
+      no_log: true
+
+    - name: Persistir state file en snapshot
+      ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+    # ── FASE 2: PREPARING_TARGET & CONTROL VOLUMES ───────────────────────────
+    - name: Marcar fase PREPARING_TARGET
+      ansible.builtin.set_fact:
+        mongo_tls_current_phase: "PREPARING_TARGET"
+
+    - name: Obtener epoch actual para forward
+      ansible.builtin.command:
+        argv:
+          - date
+          - +%s
+      register: mongo_tls_forward_now_epoch
+      changed_when: false
+
+    - name: Calcular deadline forward desde hora real actual
+      ansible.builtin.set_fact:
+        mongo_tls_operation_deadline: "{{ (mongo_tls_forward_now_epoch.stdout | int) + 600 }}"
+
+    - name: Crear control volumes y escribir operation-active (mode=forward)
+      ansible.builtin.include_tasks: tasks/tls_control_volume_setup.yml
+
+    - name: Persistir state file tras configurar control volumes
+      ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+    # ── BLOCK A: RUNTIME TRANSITION & BARRIER (CON RESCUE A ROLLBACK GLOBAL) ─
+    - name: BLOCK A — Transicion runtime y barrera sincronizada
+      block:
+        - name: Marcar fase UPDATING_SERVICES
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "UPDATING_SERVICES"
+
+        - name: Persistir estado antes de updates de servicios
+          ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+        - name: Actualizar los 3 servicios a PERMANENT_ALLOWTLS_SPEC
+          ansible.builtin.include_tasks: tasks/tls_service_update_api.yml
+          loop: "{{ mongo_tls_service_names }}"
+          loop_control:
+            loop_var: mongo_tls_target_node
+          vars:
+            mongo_tls_target_spec_mode: "permanent_allowtls"
+            mongo_tls_force_update: true
+            mongo_tls_expected_version_index: "{{ mongo_tls_snapshot_services[mongo_tls_target_node].identity.version_index_at_snapshot }}"
+
+        - name: Marcar fase WAITING_GATE
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "WAITING_GATE"
+
+        - name: Persistir estado esperando gate
+          ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+        - name: Esperar barrera forward (old tasks shutdown y new tasks en /tmp/gate-ready)
+          ansible.builtin.include_tasks: tasks/tls_gate_wait.yml
+          vars:
+            mongo_tls_barrier_old_task_info: "{{ mongo_tls_old_task_info }}"
+
+        - name: Marcar fase VERIFYING_BARRIER
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "VERIFYING_BARRIER"
+
+        - name: Persistir estado con barrera verificada
+          ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+        - name: Marcar fase RELEASING_GATE
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "RELEASING_GATE"
+
+        - name: Liberar gate forward para los 3 servicios en sucesion rapida
+          ansible.builtin.include_tasks: tasks/tls_gate_release.yml
+          loop: "{{ mongo_tls_service_names }}"
+          loop_control:
+            loop_var: mongo_tls_release_node
+
+        - name: Marcar fase STARTING_MONGOD
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "STARTING_MONGOD"
+
+        - name: Persistir estado tras liberacion de gate
+          ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+        - name: Esperar convergencia Swarm de los 3 servicios
+          ansible.builtin.include_tasks: tasks/tls_wait_service.yml
+          loop: "{{ mongo_tls_service_names }}"
+          loop_control:
+            loop_var: mongo_tls_wait_service
+
+        - name: Pausa para estabilizacion de Replica Set en allowTLS
+          ansible.builtin.pause:
+            seconds: 15
+
+        - name: Marcar fase VALIDATING
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "VALIDATING"
+
+        - name: Ejecutar validacion integral de cluster, identidad y TLS
+          ansible.builtin.include_tasks: "{{ playbook_dir }}/../validation/tasks/validate_mongodb_tls_tasks.yml"
+
+      rescue:
+        - name: Registrar error de runtime transition y disparar rollback global
+          ansible.builtin.set_fact:
+            mongo_tls_error_reason: "{{ ansible_failed_result.msg | default('Fallo durante runtime transition forward') }}"
+            mongo_tls_source_mode: "mixed"
+
+        - name: Ejecutar rollback global a PERMANENT_DISABLED_SPEC para los 3 servicios
+          ansible.builtin.include_tasks: tasks/tls_rollback_transition.yml
+
+        - name: Abortar tras rollback seguro
+          ansible.builtin.fail:
+            msg: "Rollout allowTLS fallo en runtime. Los 3 servicios fueron restaurados a PERMANENT_DISABLED_SPEC."
+
+    # ── BLOCK B: POST-RUNTIME ADMINISTRATIVE FINALIZATION ────────────────────
+    - name: BLOCK B — Finalizacion administrativa y persistencia local
+      block:
+        - name: Marcar fase CLEANING_CONTROL_STATE
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "CLEANING_CONTROL_STATE"
+            mongo_tls_final_phase: "SUCCESS"
+
+        - name: Limpiar control volumes post-validacion exitosa
+          ansible.builtin.include_tasks: tasks/tls_control_volume_cleanup.yml
+
+        - name: Marcar fase PERSISTING_LOCAL_STATE
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "PERSISTING_LOCAL_STATE"
+
+        - name: Consultar archivo vars/local.yml antes de persistir
+          ansible.builtin.stat:
+            path: "{{ mongo_tls_local_vars_path }}"
+          register: mongo_tls_local_vars_stat
+
+        - name: Validar estructura segura en vars/local.yml
+          ansible.builtin.assert:
+            that:
+              - (local_vars_content | regex_findall('(?m)^mongo_tls_enabled:.*$') | length) == 1
+              - (local_vars_content | regex_findall('(?m)^mongo_tls_clients_enabled:.*$') | length) == 1
+              - (local_vars_content | regex_findall('(?m)^mongo_tls_target_mode:.*$') | length) == 1
+              - (local_vars_content | regex_findall('(?m)^mongo_tls_deployment_mode:.*$') | length) == 1
+            fail_msg: "vars/local.yml no permite persistencia TLS atomica segura."
+          vars:
+            local_vars_content: "{{ lookup('ansible.builtin.file', mongo_tls_local_vars_path, rstrip=false) }}"
+
+        - name: Persistir allowTLS en vars/local.yml
+          ansible.builtin.copy:
+            dest: "{{ mongo_tls_local_vars_path }}"
+            mode: "{{ mongo_tls_local_vars_stat.stat.mode }}"
+            content: >-
+              {{
+                lookup('ansible.builtin.file', mongo_tls_local_vars_path, rstrip=false)
+                | regex_replace('(?m)^mongo_tls_enabled:.*$', 'mongo_tls_enabled: true')
+                | regex_replace('(?m)^mongo_tls_clients_enabled:.*$', 'mongo_tls_clients_enabled: false')
+                | regex_replace('(?m)^mongo_tls_target_mode:.*$', 'mongo_tls_target_mode: "requireTLS"')
+                | regex_replace('(?m)^mongo_tls_deployment_mode:.*$', 'mongo_tls_deployment_mode: "allowTLS"')
+              }}
+          register: mongo_tls_state_persisted
+
+        - name: Marcar fase SUCCESS
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "SUCCESS"
+            mongo_tls_needs_manual_recovery: false
+
+        - name: Persistir state file final SUCCESS
+          ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+      rescue:
+        - name: Manejar fallo de cleanup/persistencia administrativa (sin rollback de cluster sano)
+          ansible.builtin.set_fact:
+            mongo_tls_current_phase: "NEEDS_MANUAL_RECOVERY"
+            mongo_tls_needs_manual_recovery: true
+            mongo_tls_error_reason: "ADMIN_FINALIZATION_FAILED: {{ ansible_failed_result.msg | default('Fallo en cleanup o vars/local.yml') }}"
+
+        - name: Persistir state file en NEEDS_MANUAL_RECOVERY
+          ansible.builtin.include_tasks: tasks/tls_state_file.yml
+
+        - name: Abortar tras fallo administrativo con cluster en allowTLS
+          ansible.builtin.fail:
+            msg: "Cluster esta en allowTLS sano, pero fallo la finalizacion administrativa. Estado: NEEDS_MANUAL_RECOVERY."

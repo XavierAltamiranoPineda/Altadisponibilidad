@@ -1,0 +1,57 @@
+---
+# ============================================================
+# AMBIENTE DESARROLLO
+# ============================================================
+
+environment_name: "development"
+
+# ============================================================
+# TLS DESARROLLO - PKI PROPORCIONADA POR INFRAESTRUCTURA
+# ============================================================
+
+mongo_tls_enabled: "{{ development_mongo_tls_enabled }}"
+mongo_tls_clients_enabled: "{{ development_mongo_tls_clients_enabled }}"
+mongo_tls_target_mode: "{{ development_mongo_tls_target_mode }}"
+mongo_tls_deployment_mode: "{{ development_mongo_tls_deployment_mode }}"
+
+mongo_tls_provisioning_source: "pki_provided"
+mongo_tls_secret_version: "{{ development_mongo_tls_secret_version }}"
+mongo_tls_ca_secret_version: "{{ development_mongo_tls_ca_secret_version }}"
+mongo_tls_node_secret_version: "{{ development_mongo_tls_node_secret_version }}"
+
+mongo_tls_ca_cert_path: "{{ development_mongo_tls_ca_cert_path }}"
+mongo_tls_nodes_certificates: "{{ development_mongo_tls_nodes_certificates }}"
+
+# Estos valores deben ser definidos por infraestructura
+mongo_database: "{{ development_mongo_database }}"
+
+# URI de conexion para respaldo con alta disponibilidad en desarrollo (Replica Set)
+mongo_backup_uri: "{{ development_mongo_backup_uri }}"
+
+# Red de contenedores o infraestructura en desarrollo
+mongo_backup_network: "{{ development_mongo_backup_network }}"
+
+# Imagen Docker dedicada para las herramientas de respaldo
+mongo_backup_tools_image: "{{ development_mongo_backup_tools_image | default('mongo-backup-tools:100.18.0') }}"
+
+# Imagen base del contenedor para Database Tools en desarrollo
+mongodb_tools_container_base_image: "{{ development_mongodb_tools_container_base_image | default('ubuntu:24.04') }}"
+
+# Servicios MongoDB para trazabilidad en desarrollo
+mongo_trace_services: "{{ development_mongo_trace_services }}"
+
+# Plataforma de herramientas para ambiente de desarrollo
+mongodb_tools_platform: "{{ development_mongodb_tools_platform | default('ubuntu2404') }}"
+mongodb_tools_arch: "{{ development_mongodb_tools_arch | default('x86_64') }}"
+
+# Ruta de respaldo para desarrollo
+backup_root: "{{ development_backup_repository }}"
+
+# Ruta de logs
+backup_log_root: "{{ development_backup_log_root }}"
+
+# Ruta del archivo de password de Vault para ejecucion no interactiva (Cron)
+ansible_vault_password_file: "{{ development_ansible_vault_password_file }}"
+
+# Puede ser cron, Jenkins, Rundeck u otra herramienta institucional
+backup_scheduler: "{{ development_backup_scheduler | default('cron') }}"

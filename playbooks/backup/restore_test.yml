@@ -1,0 +1,69 @@
+---
+- name: Probar restauracion MongoDB desde backup
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+    - "{{ playbook_dir }}/../../vars/vault_mongodb.yml"
+
+  vars:
+    restore_test_database: "{{ mongo_database }}_restore_test"
+
+  tasks:
+
+    # ============================================================
+    # LOCALIZAR BACKUP POR TIMESTAMP (YYYYMMDD_HHMMSS)
+    # ============================================================
+
+    - name: Incluir tareas de seleccion de respaldo por timestamp
+      ansible.builtin.include_tasks: tasks/restore_select_backup_tasks.yml
+
+    # ============================================================
+    # VALIDAR INTEGRIDAD ANTES DEL RESTORE
+    # ============================================================
+
+    - name: Validar checksum SHA-256 antes del restore
+      ansible.builtin.shell: |
+        cd "$(dirname "{{ backup_file_path }}")"
+        sha256sum -c "$(basename "{{ checksum_file_path }}")"
+      register: checksum_validation
+      changed_when: false
+      failed_when: false
+
+    - name: Confirmar integridad previa
+      ansible.builtin.assert:
+        that:
+          - checksum_validation.rc == 0
+        fail_msg: "[ERROR] El backup no supera la validacion SHA-256"
+        success_msg: "[OK] Integridad SHA-256 validada antes del restore"
+
+    # ============================================================
+    # TAREAS COMUNES DE RESTAURACION Y VALIDACION
+    # ============================================================
+
+    - name: Incluir tareas de restauracion comunes
+      ansible.builtin.include_tasks: tasks/restore_test_tasks.yml
+
+    # ============================================================
+    # RESULTADO
+    # ============================================================
+
+    - name: Mostrar resultado final
+      ansible.builtin.debug:
+        msg:
+          - "============================================================"
+          - "PRUEBA DE RESTAURACION COMPLETADA"
+          - "============================================================"
+          - "Ambiente: {{ environment_name }}"
+          - "Backup: {{ backup_file_path }}"
+          - "Base origen: {{ mongo_database }}"
+          - "Base restaurada: {{ restore_test_database }}"
+          - "Documentos origen: {{ original_documents.stdout }}"
+          - "Documentos restaurados: {{ restored_documents.stdout }}"
+          - "SHA-256 previo: OK"
+          - "mongorestore: {{ mongodb_tools_version }}"
+          - "Estado: RESTORE VALIDADO"
+          - "============================================================"

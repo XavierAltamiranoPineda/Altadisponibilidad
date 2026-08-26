@@ -1,0 +1,230 @@
+---
+- name: Definir identidad runtime esperada
+  ansible.builtin.set_fact:
+    mongo_image_runtime_user: >-
+      {{ mongo_image_runtime_user_override
+         | default(mongo_image_expected_runtime_user, true) }}
+    mongo_image_runtime_group: >-
+      {{ mongo_image_runtime_group_override
+         | default(mongo_image_expected_runtime_group, true) }}
+    mongo_image_entrypoint: >-
+      {{ mongo_image_entrypoint_override
+         | default(mongo_image_expected_entrypoint, true) }}
+
+- name: Inspeccionar imagen MongoDB aprobada
+  ansible.builtin.command:
+    argv:
+      - docker
+      - image
+      - inspect
+      - "{{ mongo_image }}"
+  register: mongo_tls_runtime_image_raw
+  changed_when: false
+
+- name: Interpretar imagen MongoDB aprobada
+  ansible.builtin.set_fact:
+    mongo_tls_runtime_image: "{{ mongo_tls_runtime_image_raw.stdout | from_json | first }}"
+
+- name: Detectar UID GID entrypoint y mongod dinamicamente
+  ansible.builtin.command:
+    argv:
+      - docker
+      - run
+      - --rm
+      - --network
+      - none
+      - --entrypoint
+      - /bin/sh
+      - "{{ mongo_image }}"
+      - -ec
+      - |
+          runtime_user="$1"
+          expected_entrypoint="$2"
+          declared_entrypoint="$3"
+          uid="$(id -u "$runtime_user")"
+          gid="$(id -g "$runtime_user")"
+          group="$(id -gn "$runtime_user")"
+          entrypoint="$(readlink -f "$expected_entrypoint")"
+          declared="$(readlink -f "$(command -v "$declared_entrypoint")")"
+          mongod="$(readlink -f "$(command -v mongod)")"
+          test -x "$entrypoint"
+          test -x "$mongod"
+          printf '{"uid":"%s","gid":"%s","group":"%s","entrypoint":"%s","declared_entrypoint":"%s","mongod":"%s"}\n' \
+            "$uid" "$gid" "$group" "$entrypoint" "$declared" "$mongod"
+      - --
+      - "{{ mongo_image_runtime_user }}"
+      - "{{ mongo_image_entrypoint }}"
+      - "{{ mongo_tls_runtime_image.Config.Entrypoint[0] }}"
+  register: mongo_tls_runtime_identity_raw
+  changed_when: false
+
+- name: Interpretar identidad runtime
+  ansible.builtin.set_fact:
+    mongo_tls_runtime_identity: "{{ mongo_tls_runtime_identity_raw.stdout | from_json }}"
+
+- name: Validar identidad runtime contra preflight
+  ansible.builtin.assert:
+    that:
+      - mongo_tls_runtime_identity.group == mongo_image_runtime_group
+      - mongo_tls_runtime_identity.entrypoint == mongo_image_entrypoint
+      - mongo_tls_runtime_identity.declared_entrypoint == mongo_image_entrypoint
+      - >-
+        mongo_image_mongod_path_override is none or
+        mongo_tls_runtime_identity.mongod == mongo_image_mongod_path_override
+      - mongo_tls_runtime_image.RepoDigests | default([]) | length > 0
+    fail_msg: "Imagen o identidad runtime difiere del preflight aprobado."
+
+- name: Construir wrapper permanente unificado (disabled y allowTLS)
+  ansible.builtin.set_fact:
+    mongo_tls_runtime_script: |
+      set -eu
+      umask 077
+      RUNTIME_UID="$1"
+      RUNTIME_GID="$2"
+      RUNTIME_ENTRYPOINT="$3"
+      TLS_MODE="${4:-}"
+      EXPECTED_NODE="${5:-}"
+
+      # ── VALIDACION FAIL-CLOSED DE ARGUMENTOS POSICIONALES ─────────────────────────
+      case "$TLS_MODE" in
+        disabled|allowTLS) ;;
+        *)
+          echo "FAIL-CLOSED: TLS_MODE invalido: '$TLS_MODE'" >&2
+          exit 1
+          ;;
+      esac
+
+      case "$EXPECTED_NODE" in
+        mongo1|mongo2|mongo3) ;;
+        *)
+          echo "FAIL-CLOSED: EXPECTED_NODE invalido: '$EXPECTED_NODE'" >&2
+          exit 1
+          ;;
+      esac
+
+      CTRL="/run/tls-control"
+
+      # ── SIEMPRE: validar y materializar keyfile ──────────────────────────────────
+      test -r /run/secrets/mongo_keyfile || { echo "FAIL-CLOSED: mongo_keyfile inaccesible" >&2; exit 1; }
+      install -m 0400 -o "$RUNTIME_UID" -g "$RUNTIME_GID" /run/secrets/mongo_keyfile /etc/mongo-keyfile
+      test -s /etc/mongo-keyfile || { echo "FAIL-CLOSED: keyfile vacio" >&2; exit 1; }
+
+      # ── SI allowTLS: validar y materializar secretos TLS ─────────────────────────
+      if [ "$TLS_MODE" = "allowTLS" ]; then
+        test -r /run/secrets/mongo_tls_ca       || { echo "FAIL-CLOSED: mongo_tls_ca inaccesible" >&2; exit 1; }
+        test -r /run/secrets/mongo_tls_node_pem || { echo "FAIL-CLOSED: mongo_tls_node_pem inaccesible" >&2; exit 1; }
+        install -d -m 0700 -o "$RUNTIME_UID" -g "$RUNTIME_GID" /run/mongo-tls
+        install -m 0440 -o "$RUNTIME_UID" -g "$RUNTIME_GID" /run/secrets/mongo_tls_ca /run/mongo-tls/mongo_ca.pem
+        install -m 0400 -o "$RUNTIME_UID" -g "$RUNTIME_GID" /run/secrets/mongo_tls_node_pem /run/mongo-tls/mongo.pem
+        test -s /run/mongo-tls/mongo.pem    || { echo "FAIL-CLOSED: mongo.pem vacio" >&2; exit 1; }
+        test -s /run/mongo-tls/mongo_ca.pem || { echo "FAIL-CLOSED: mongo_ca.pem vacio" >&2; exit 1; }
+      fi
+
+      test -x "$RUNTIME_ENTRYPOINT" || { echo "FAIL-CLOSED: entrypoint no ejecutable" >&2; exit 1; }
+
+      # ── VERIFICAR ARCHIVOS DE CONTROL ─────────────────────────────────────────────
+      ACTIVE_FILE="$CTRL/operation-active"
+      START_FILE="$CTRL/operation-start"
+
+      if [ ! -f "$ACTIVE_FILE" ]; then
+        MODE="NORMAL"
+        echo "MODE=NORMAL tls=$TLS_MODE node=$EXPECTED_NODE"
+      else
+        MODE="GATE"
+        OP_ID="$(grep '^operation_id=' "$ACTIVE_FILE" | cut -d= -f2- || true)"
+        OP_MODE="$(grep '^mode=' "$ACTIVE_FILE" | cut -d= -f2- || true)"
+        DEADLINE="$(grep '^deadline=' "$ACTIVE_FILE" | cut -d= -f2- || true)"
+        CONTROL_NODE="$(grep '^node=' "$ACTIVE_FILE" | cut -d= -f2- || true)"
+        TARGET="$(grep '^target=' "$ACTIVE_FILE" | cut -d= -f2- || true)"
+
+        [ -n "$OP_ID" ] || { echo "FAIL-CLOSED: operation_id ausente" >&2; exit 1; }
+        [ -n "$TARGET" ] || { echo "FAIL-CLOSED: target ausente" >&2; exit 1; }
+
+        case "$OP_MODE" in
+          forward|rollback) ;;
+          *) echo "FAIL-CLOSED: mode invalido: '$OP_MODE'" >&2; exit 1 ;;
+        esac
+
+        case "$DEADLINE" in
+          ''|*[!0-9]*) echo "FAIL-CLOSED: deadline invalido: '$DEADLINE'" >&2; exit 1 ;;
+        esac
+        [ "$DEADLINE" -gt 0 ] || { echo "FAIL-CLOSED: deadline debe ser mayor a 0" >&2; exit 1; }
+
+        [ "$CONTROL_NODE" = "$EXPECTED_NODE" ] || {
+          echo "FAIL-CLOSED: node mismatch: expected '$EXPECTED_NODE' got '$CONTROL_NODE'" >&2
+          exit 1
+        }
+
+        if [ "$OP_MODE" = "forward" ]; then
+          [ "$TARGET" = "allowTLS" ] || { echo "FAIL-CLOSED: target incoherente con forward: '$TARGET'" >&2; exit 1; }
+          [ "$TLS_MODE" = "allowTLS" ] || { echo "FAIL-CLOSED: TLS_MODE incoherente con forward: '$TLS_MODE'" >&2; exit 1; }
+        fi
+
+        if [ "$OP_MODE" = "rollback" ]; then
+          [ "$TARGET" = "disabled" ] || { echo "FAIL-CLOSED: target incoherente con rollback: '$TARGET'" >&2; exit 1; }
+          [ "$TLS_MODE" = "disabled" ] || { echo "FAIL-CLOSED: TLS_MODE incoherente con rollback: '$TLS_MODE'" >&2; exit 1; }
+        fi
+
+        echo "MODE=GATE op_id=$OP_ID op_mode=$OP_MODE tls=$TLS_MODE node=$EXPECTED_NODE"
+
+        if pgrep -x mongod > /dev/null 2>&1; then
+          echo "FAIL-CLOSED: mongod ya ejecutandose en modo gate — estado corrupto" >&2
+          exit 1
+        fi
+
+        # Marker en /tmp/gate-ready accesible por docker exec
+        touch /tmp/gate-ready
+        chmod 0444 /tmp/gate-ready
+        echo "GATE_READY op_id=$OP_ID op_mode=$OP_MODE"
+
+        while :; do
+          if [ -f "$START_FILE" ]; then
+            START_OP_ID="$(grep '^operation_id=' "$START_FILE" | cut -d= -f2- || true)"
+            START_CONTENT="$(cat "$START_FILE")"
+            [ -n "$START_OP_ID" ] || {
+              echo "FAIL-CLOSED: operation-start vacio o corrupto" >&2
+              exit 1
+            }
+            [ "$START_CONTENT" = "operation_id=$OP_ID" ] || {
+              echo "FAIL-CLOSED: operation-start no corresponde a la operacion activa" >&2
+              exit 1
+            }
+            [ "$START_OP_ID" = "$OP_ID" ] || {
+              echo "FAIL-CLOSED: operation_id generacional no coincide" >&2
+              exit 1
+            }
+            break
+          fi
+
+          NOW=$(date +%s)
+          if [ "$NOW" -gt "$DEADLINE" ]; then
+            echo "FAIL-CLOSED: Gate deadline=$DEADLINE superado sin recibir operation-start" >&2
+            exit 1
+          fi
+          sleep 1
+        done
+
+        echo "GATE_RELEASED op_id=$OP_ID op_mode=$OP_MODE"
+      fi
+
+      # ── EJECUTAR MONGOD ───────────────────────────────────────────────────────────
+      if [ "$TLS_MODE" = "allowTLS" ]; then
+        exec "$RUNTIME_ENTRYPOINT" mongod \
+          --replSet {{ mongo_replica_set }} \
+          --auth \
+          --clusterAuthMode keyFile \
+          --keyFile /etc/mongo-keyfile \
+          --bind_ip_all \
+          --tlsMode allowTLS \
+          --tlsCertificateKeyFile /run/mongo-tls/mongo.pem \
+          --tlsCAFile /run/mongo-tls/mongo_ca.pem \
+          --tlsAllowConnectionsWithoutCertificates \
+          --setParameter tlsWithholdClientCertificate=true
+      else
+        exec "$RUNTIME_ENTRYPOINT" mongod \
+          --replSet {{ mongo_replica_set }} \
+          --auth \
+          --clusterAuthMode keyFile \
+          --keyFile /etc/mongo-keyfile \
+          --bind_ip_all
+      fi

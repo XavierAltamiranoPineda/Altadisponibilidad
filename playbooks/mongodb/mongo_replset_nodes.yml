@@ -1,0 +1,168 @@
+---
+- name: Crear nodos secundarios MongoDB en Docker Swarm
+  hosts: localhost
+  connection: local
+  gather_facts: false
+
+  vars:
+    mongo_image: "mongo:7-jammy"
+    mongo_network: "mongo_swarm_net"
+    mongo_secret: "mongo_keyfile"
+    mongo_keyfile: "/etc/mongo-keyfile"
+
+    mongo_nodes:
+      - name: mongo2
+        volume: mongo2_data
+        port: 27018
+
+      - name: mongo3
+        volume: mongo3_data
+        port: 27019
+
+  tasks:
+
+    # ============================================================
+    # VALIDACIONES PREVIAS
+    # ============================================================
+
+    - name: Verificar estado de Docker Swarm
+      ansible.builtin.command:
+        cmd: docker info --format "{{ '{{.Swarm.LocalNodeState}}' }}"
+      register: swarm_state
+      changed_when: false
+
+    - name: Validar Docker Swarm
+      ansible.builtin.assert:
+        that:
+          - swarm_state.stdout == "active"
+        fail_msg: "Docker Swarm no está activo."
+        success_msg: "OK: Docker Swarm activo."
+
+    - name: Verificar red MongoDB
+      ansible.builtin.command:
+        cmd: docker network inspect {{ mongo_network }}
+      register: network_check
+      changed_when: false
+      failed_when: false
+
+    - name: Validar red MongoDB
+      ansible.builtin.assert:
+        that:
+          - network_check.rc == 0
+        fail_msg: "La red {{ mongo_network }} no existe."
+        success_msg: "OK: Red {{ mongo_network }} disponible."
+
+    - name: Verificar Docker Secret
+      ansible.builtin.command:
+        cmd: docker secret inspect {{ mongo_secret }}
+      register: secret_check
+      changed_when: false
+      failed_when: false
+
+    - name: Validar Docker Secret
+      ansible.builtin.assert:
+        that:
+          - secret_check.rc == 0
+        fail_msg: "El Docker Secret {{ mongo_secret }} no existe."
+        success_msg: "OK: Docker Secret {{ mongo_secret }} disponible."
+
+
+    # ============================================================
+    # CREAR MONGO2 Y MONGO3
+    # ============================================================
+
+    - name: Verificar existencia de nodos MongoDB
+      ansible.builtin.command:
+        cmd: docker service inspect {{ item.name }}
+      loop: "{{ mongo_nodes }}"
+      register: existing_services
+      changed_when: false
+      failed_when: false
+
+    - name: Eliminar servicios MongoDB anteriores
+      ansible.builtin.command:
+        cmd: docker service rm {{ item.item.name }}
+      loop: "{{ existing_services.results }}"
+      when: item.rc == 0
+
+    - name: Esperar eliminación de servicios anteriores
+      ansible.builtin.command:
+        cmd: docker service inspect {{ item.name }}
+      loop: "{{ mongo_nodes }}"
+      register: deletion_check
+      retries: 10
+      delay: 2
+      until: deletion_check.rc != 0
+      changed_when: false
+      failed_when: false
+
+    - name: Crear servicios MongoDB secundarios
+      ansible.builtin.command:
+        cmd: >
+          docker service create
+          --name {{ item.name }}
+          --label iess.project=base-spring-api
+          --label iess.component=auditoria-mongo
+          --network {{ mongo_network }}
+          --publish published={{ item.port }},target=27017
+          --secret source={{ mongo_secret }},target=mongo_keyfile
+          --mount type=volume,source={{ item.volume }},target=/data/db
+          {{ mongo_image }}
+          sh -c
+          "cp /run/secrets/mongo_keyfile {{ mongo_keyfile }}
+          &&
+          chmod 400 {{ mongo_keyfile }}
+          &&
+          exec mongod
+          --replSet rs0
+          --auth
+          --keyFile {{ mongo_keyfile }}
+          --bind_ip_all"
+      loop: "{{ mongo_nodes }}"
+
+    # ============================================================
+    # ESPERAR ARRANQUE
+    # ============================================================
+
+    - name: Esperar que MongoDB secundarios estén ejecutándose
+      ansible.builtin.command:
+        cmd: docker service ps {{ item.name }} --format "{{ '{{.CurrentState}}' }}"
+      loop: "{{ mongo_nodes }}"
+      register: mongo_states
+      retries: 20
+      delay: 3
+      until:
+        - mongo_states.rc == 0
+        - "'Running' in mongo_states.stdout"
+      changed_when: false
+
+    # ============================================================
+    # VALIDACIÓN
+    # ============================================================
+
+    - name: Obtener estado de servicios MongoDB
+      ansible.builtin.command:
+        cmd: docker service ls --filter name={{ item.name }} --format "{{ '{{.Name}} {{.Replicas}}' }}"
+      loop: "{{ mongo_nodes }}"
+      register: mongo_replicas
+      changed_when: false
+
+    - name: Mostrar resultado
+      ansible.builtin.debug:
+        msg:
+          - ""
+          - "============================================================"
+          - "        NODOS SECUNDARIOS MONGODB V2"
+          - "============================================================"
+          - ""
+          - "[OK] MongoDB secundarios creados"
+          - "[OK] Imagen: {{ mongo_image }}"
+          - "[OK] Red: {{ mongo_network }}"
+          - "[OK] Secret: {{ mongo_secret }}"
+          - "[OK] KeyFile: {{ mongo_keyfile }}"
+          - ""
+          - "Servicios:"
+          - "{{ mongo_replicas.results | map(attribute='stdout') | list }}"
+          - ""
+          - "============================================================"
+

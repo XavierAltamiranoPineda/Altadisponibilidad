@@ -1,0 +1,63 @@
+---
+- name: Registrar servicio antes del update
+  ansible.builtin.set_fact:
+    mongo_tls_attempted_services: "{{ mongo_tls_attempted_services + [mongo_tls_rollout_node] }}"
+
+- name: Actualizar servicio a allowTLS
+  ansible.builtin.command:
+    argv:
+      - docker
+      - service
+      - update
+      - --detach
+      - --entrypoint
+      - /bin/sh
+      - --args
+      - "{{ mongo_tls_service_args }}"
+      - --mount-add
+      - "type=tmpfs,target={{ mongo_tls_runtime_dir }},tmpfs-size=1048576,tmpfs-mode=0700"
+      - --secret-add
+      - "source=mongo_tls_ca_{{ mongo_tls_ca_secret_version }},target=mongo_tls_ca,mode=0444"
+      - --secret-add
+      - "source={{ mongo_tls_rollout_node }}_tls_pem_{{ mongo_tls_node_secret_version }},target=mongo_tls_node_pem,mode=0400"
+      - --update-order
+      - stop-first
+      - --update-parallelism
+      - "1"
+      - --update-failure-action
+      - pause
+      - --update-monitor
+      - 60s
+      - --rollback-order
+      - stop-first
+      - --rollback-parallelism
+      - "1"
+      - --rollback-failure-action
+      - pause
+      - --rollback-monitor
+      - 60s
+      - "{{ mongo_tls_rollout_node }}"
+  register: mongo_tls_service_update
+
+- name: Registrar servicio actualizado
+  ansible.builtin.set_fact:
+    mongo_tls_updated_services: "{{ mongo_tls_updated_services + [mongo_tls_rollout_node] }}"
+
+- name: Esperar servicio actualizado
+  ansible.builtin.include_tasks: tls_wait_service.yml
+  vars:
+    mongo_tls_wait_service: "{{ mongo_tls_rollout_node }}"
+
+- name: Esperar rol saludable tras update
+  ansible.builtin.include_tasks: tls_query_cluster.yml
+  vars:
+    mongo_tls_cluster_expected_node: >-
+      {{ mongo_tls_rollout_node
+         if mongo_tls_expected_state_after_update | default('') | length > 0
+         else '' }}
+    mongo_tls_cluster_expected_state: "{{ mongo_tls_expected_state_after_update }}"
+
+- name: Validar TLS y plaintext tras update
+  ansible.builtin.include_tasks: tls_validate_transport.yml
+  vars:
+    mongo_tls_validation_node: "{{ mongo_tls_rollout_node }}"

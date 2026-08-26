@@ -1,0 +1,116 @@
+---
+# ============================================================
+# Captura de snapshots completos e invariantes para los 3 servicios
+# ============================================================
+
+- name: Capturar CLI inspect de los 3 servicios
+  ansible.builtin.command:
+    argv:
+      - docker
+      - service
+      - inspect
+      - mongo1
+      - mongo2
+      - mongo3
+  register: mongo_tls_cli_inspect_raw
+  changed_when: false
+
+- name: Extraer specs e identidades de snapshot
+  ansible.builtin.set_fact:
+    mongo_tls_snapshot_services: >-
+      {{
+        mongo_tls_snapshot_services | default({}) | combine({
+          item.Spec.Name: {
+            'identity': {
+              'service_id': item.ID,
+              'version_index_at_snapshot': item.Version.Index,
+              'created_at': item.CreatedAt,
+              'updated_at': item.UpdatedAt
+            },
+            'spec': item.Spec,
+            'container_spec': item.Spec.TaskTemplate.ContainerSpec,
+            'labels': item.Spec.Labels | default({}),
+            'mode': item.Spec.Mode,
+            'update_config': item.Spec.UpdateConfig | default({}),
+            'rollback_config': item.Spec.RollbackConfig | default({}),
+            'endpoint_spec': item.Spec.EndpointSpec,
+            'mounts': item.Spec.TaskTemplate.ContainerSpec.Mounts | default([]),
+            'secrets': item.Spec.TaskTemplate.ContainerSpec.Secrets | default([]),
+            'resources': item.Spec.TaskTemplate.Resources | default({}),
+            'restart_policy': item.Spec.TaskTemplate.RestartPolicy | default({}),
+            'placement': item.Spec.TaskTemplate.Placement | default({}),
+            'networks': item.Spec.TaskTemplate.Networks | default([]),
+            'force_update': item.Spec.TaskTemplate.ForceUpdate | default(0)
+          }
+        })
+      }}
+  loop: "{{ mongo_tls_cli_inspect_raw.stdout | from_json }}"
+  loop_control:
+    label: "{{ item.Spec.Name }}"
+
+- name: Capturar task activa y container_id por servicio via API
+  ansible.builtin.command:
+    argv:
+      - curl
+      - --silent
+      - --unix-socket
+      - /var/run/docker.sock
+      - "http://localhost/tasks?filters=%7B%22service%22%3A%5B%22{{ item }}%22%5D%2C%22desired-state%22%3A%5B%22running%22%5D%7D"
+  register: mongo_tls_tasks_query_raw
+  loop: "{{ mongo_tls_service_names }}"
+  changed_when: false
+
+- name: Registrar old_task_id y old_container_id para tracking de barrera
+  ansible.builtin.set_fact:
+    mongo_tls_old_task_info: >-
+      {{
+        mongo_tls_old_task_info | default({}) | combine({
+          item.item: {
+            'task_id': (item.stdout | from_json | selectattr('Status.State', 'equalto', 'running') | map(attribute='ID') | first | default('')),
+            'container_id': (item.stdout | from_json | selectattr('Status.State', 'equalto', 'running') | map(attribute='Status') | map(attribute='ContainerStatus') | map(attribute='ContainerID') | first | default('')),
+            'task_state': (item.stdout | from_json | selectattr('Status.State', 'equalto', 'running') | map(attribute='Status') | map(attribute='State') | first | default('unknown'))
+          }
+        })
+      }}
+  loop: "{{ mongo_tls_tasks_query_raw.results }}"
+  loop_control:
+    label: "{{ item.item }}"
+
+- name: Clasificar specs del snapshot con el helper unico
+  ansible.builtin.include_tasks: tls_classify_service_specs.yml
+  vars:
+    mongo_tls_service_inspects: "{{ mongo_tls_cli_inspect_raw.stdout | from_json }}"
+
+- name: Registrar clasificacion de specs del snapshot
+  ansible.builtin.set_fact:
+    mongo_tls_node_spec_status: "{{ mongo_tls_classified_spec_modes }}"
+
+- name: Capturar snapshot de datos e invariantes
+  ansible.builtin.command:
+    argv:
+      - docker
+      - volume
+      - inspect
+      - mongo1_data
+      - mongo2_data
+      - mongo3_data
+  register: mongo_tls_initial_volumes_raw
+  changed_when: false
+
+- name: Registrar volumenes iniciales
+  ansible.builtin.set_fact:
+    mongo_tls_initial_volumes: "{{ mongo_tls_initial_volumes_raw.stdout | from_json }}"
+
+- name: Capturar snapshot de secreto mongo_keyfile
+  ansible.builtin.command:
+    argv:
+      - docker
+      - secret
+      - inspect
+      - mongo_keyfile
+  register: mongo_tls_initial_keyfile_raw
+  changed_when: false
+
+- name: Registrar secreto mongo_keyfile inicial
+  ansible.builtin.set_fact:
+    mongo_tls_initial_keyfile: "{{ mongo_tls_initial_keyfile_raw.stdout | from_json | first }}"
