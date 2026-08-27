@@ -112,6 +112,7 @@
                         | regex_replace('(?m)^mongo_tls_clients_enabled:.*$', 'mongo_tls_clients_enabled: true')
                         | regex_replace('(?m)^mongo_tls_target_mode:.*$', 'mongo_tls_target_mode: "requireTLS"')
                         | regex_replace('(?m)^mongo_tls_deployment_mode:.*$', 'mongo_tls_deployment_mode: "requireTLS"')
+                        | regex_replace('(?m)^mongo_backup_uri:.*$', 'mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0&tls=true"')
                       }}
 
                 - name: Marcar estado SUCCESS en recovery requireTLS
@@ -340,7 +341,7 @@
       ansible.builtin.set_fact:
         mongo_tls_precheck_decision: >-
           {%- set prev_phase = mongo_tls_previous_state.phase | default('NONE') -%}
-          {%- if prev_phase in ['SUCCESS', 'FAILED_ROLLED_BACK', 'ABORTED_PRE_MUTATION'] -%}CLEANUP_AND_CONTINUE
+          {%- if prev_phase in ['NONE', 'SUCCESS', 'FAILED_ROLLED_BACK', 'ABORTED_PRE_MUTATION'] -%}CLEANUP_AND_CONTINUE
           {%- else -%}CONTINUE{%- endif -%}
       when: mongo_tls_precheck_decision is not defined
 

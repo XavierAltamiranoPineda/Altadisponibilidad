@@ -31,76 +31,83 @@
           const expected = ['mongo1:27017', 'mongo2:27017', 'mongo3:27017'];
           const requiredNode = '{{ mongo_tls_cluster_expected_node | default('') }}';
           const requiredState = '{{ mongo_tls_cluster_expected_state | default('') }}';
-          const expectedMode = '{{ mongo_tls_expected_mode | default(mongo_tls_deployment_mode | default("allowTLS")) }}';
+          const expectedMode = '{{ mongo_tls_expected_mode | default(mongo_tls_deployment_mode | default("disabled")) }}';
 
-          const tlsPart =
-            ['allowTLS', 'preferTLS', 'requireTLS'].includes(expectedMode)
-              ? '&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem'
-              : '';
+          const baseUri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet=${replSet}&serverSelectionTimeoutMS=5000`;
+          const tlsSuffix = '&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem';
 
-          const uri =
-            `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}` +
-            `@mongo1:27017,mongo2:27017,mongo3:27017/admin` +
-            `?replicaSet=${replSet}` +
-            `&serverSelectionTimeoutMS=5000` +
-            tlsPart;
+          const primaryUri = ['allowTLS', 'preferTLS', 'requireTLS'].includes(expectedMode)
+            ? baseUri + tlsSuffix
+            : baseUri;
+
+          const fallbackUri = (expectedMode === 'requireTLS')
+            ? null
+            : (primaryUri.includes('&tls=true') ? baseUri : baseUri + tlsSuffix);
+
+          function evaluateConnection(targetUri) {
+            const db = connect(targetUri);
+            const status = db.adminCommand({replSetGetStatus: 1});
+            const config = db.adminCommand({replSetGetConfig: 1}).config;
+
+            const members = status.members.map(m => ({
+              name: m.name,
+              service: m.name.split(':')[0],
+              state: m.state,
+              stateStr: m.stateStr,
+              health: m.health
+            }));
+
+            const healthy =
+              status.set === replSet &&
+              members.length === 3 &&
+              members.filter(m => m.stateStr === 'PRIMARY' && m.health === 1).length === 1 &&
+              members.filter(m => m.stateStr === 'SECONDARY' && m.health === 1).length === 2 &&
+              members.every(m => expected.includes(m.name));
+
+            const requiredHealthy =
+              !requiredNode ||
+              members.some(m =>
+                m.service === requiredNode &&
+                m.stateStr === requiredState &&
+                m.health === 1
+              );
+
+            return {
+              set: status.set,
+              members,
+              primary: (members.find(m => m.stateStr === 'PRIMARY') || {}).service,
+              secondaries: members
+                .filter(m => m.stateStr === 'SECONDARY')
+                .map(m => m.service),
+              config: {
+                _id: config._id,
+                version: config.version,
+                protocolVersion: config.protocolVersion,
+                writeConcernMajorityJournalDefault: config.writeConcernMajorityJournalDefault,
+                members: config.members,
+                settings: config.settings
+              },
+              healthy,
+              requiredHealthy
+            };
+          }
 
           let result;
           for (let attempt = 0; attempt < {{ mongo_tls_cluster_retries | default(20) }}; attempt++) {
             try {
-              const db = connect(uri);
-              const status = db.adminCommand({replSetGetStatus: 1});
-              const config = db.adminCommand({replSetGetConfig: 1}).config;
-
-              const members = status.members.map(m => ({
-                name: m.name,
-                service: m.name.split(':')[0],
-                state: m.state,
-                stateStr: m.stateStr,
-                health: m.health
-              }));
-
-              const healthy =
-                status.set === replSet &&
-                members.length === 3 &&
-                members.filter(m => m.stateStr === 'PRIMARY' && m.health === 1).length === 1 &&
-                members.filter(m => m.stateStr === 'SECONDARY' && m.health === 1).length === 2 &&
-                members.every(m => expected.includes(m.name));
-
-              const requiredHealthy =
-                !requiredNode ||
-                members.some(m =>
-                  m.service === requiredNode &&
-                  m.stateStr === requiredState &&
-                  m.health === 1
-                );
-
-              result = {
-                set: status.set,
-                members,
-                primary: (members.find(m => m.stateStr === 'PRIMARY') || {}).service,
-                secondaries: members
-                  .filter(m => m.stateStr === 'SECONDARY')
-                  .map(m => m.service),
-                config: {
-                  _id: config._id,
-                  version: config.version,
-                  protocolVersion: config.protocolVersion,
-                  writeConcernMajorityJournalDefault: config.writeConcernMajorityJournalDefault,
-                  members: config.members,
-                  settings: config.settings
-                },
-                healthy,
-                requiredHealthy
-              };
-
-              if (healthy && requiredHealthy) break;
-            } catch (err) {
-              result = {
-                healthy: false,
-                requiredHealthy: false,
-                error: err.message
-              };
+              result = evaluateConnection(primaryUri);
+              if (result.healthy && result.requiredHealthy) break;
+            } catch (err1) {
+              if (fallbackUri) {
+                try {
+                  result = evaluateConnection(fallbackUri);
+                  if (result.healthy && result.requiredHealthy) break;
+                } catch (err2) {
+                  result = { healthy: false, requiredHealthy: false, error: err1.message };
+                }
+              } else {
+                result = { healthy: false, requiredHealthy: false, error: err1.message };
+              }
             }
 
             sleep({{ (mongo_tls_cluster_delay | default(2) | int) * 1000 }});
@@ -129,17 +136,20 @@
 - name: Mostrar topología no sensible
   ansible.builtin.debug:
     msg:
-      primary: "{{ mongo_tls_cluster_status.primary }}"
-      secondaries: "{{ mongo_tls_cluster_status.secondaries }}"
-      members: "{{ mongo_tls_cluster_status.members }}"
+      primary: "{{ mongo_tls_cluster_status.primary | default('NONE') }}"
+      secondaries: "{{ mongo_tls_cluster_status.secondaries | default([]) }}"
+      members: "{{ mongo_tls_cluster_status.members | default([]) }}"
+      healthy: "{{ mongo_tls_cluster_status.healthy | default(false) }}"
+      error: "{{ mongo_tls_cluster_status.error | default('NINGUNO') }}"
 
 - name: Validar topología interpretada
   ansible.builtin.assert:
     that:
-      - mongo_tls_cluster_status.healthy | bool
-      - mongo_tls_cluster_status.requiredHealthy | bool
-      - mongo_tls_cluster_status.set == mongo_replica_set
-      - mongo_tls_cluster_status.members | length == 3
-      - mongo_tls_cluster_status.secondaries | length == 2
-      - mongo_tls_cluster_status.primary in mongo_tls_service_names
-    fail_msg: "Replica Set no está saludable."
+      - mongo_tls_cluster_status.healthy | default(false) | bool
+      - mongo_tls_cluster_status.requiredHealthy | default(false) | bool
+      - mongo_tls_cluster_status.set | default('') == mongo_replica_set
+      - (mongo_tls_cluster_status.members | default([])) | length == 3
+      - (mongo_tls_cluster_status.secondaries | default([])) | length == 2
+      - mongo_tls_cluster_status.primary | default('') in mongo_tls_service_names
+    fail_msg: "[ERROR] Replica Set no esta saludable: {{ mongo_tls_cluster_status.error | default('Topologia o miembros incompletos') }}"
+    success_msg: "[OK] Topologia saludable del Replica Set verificada (PRIMARY: {{ mongo_tls_cluster_status.primary | default('UNKNOWN') }})"

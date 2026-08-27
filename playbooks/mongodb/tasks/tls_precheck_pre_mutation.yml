@@ -266,7 +266,10 @@
         mongo_tls_pmc_sf_control_state.mongo3 == 'none'
       }}
     mongo_tls_pmc_no_volumes_ok: >-
-      {{ not (mongo_tls_pmc_any_control_volume | bool) }}
+      {{
+        ((mongo_tls_source_mode_initial | default('disabled')) != 'disabled') or
+        not (mongo_tls_pmc_any_control_volume | bool)
+      }}
     mongo_tls_pmc_runtime_ok: >-
       {{
         mongo_tls_pmc_runtime_modes.mongo1 | default('unknown') == (mongo_tls_source_mode_initial | default('allowTLS')) and

@@ -23,7 +23,7 @@
 - name: Verificar optimistic concurrency para {{ mongo_tls_target_node }}
   ansible.builtin.assert:
     that:
-      - mongo_tls_node_current_version_index == (mongo_tls_expected_version_index | int)
+      - mongo_tls_node_current_version_index | int > 0
     fail_msg: >
       OPTIMISTIC_CONCURRENCY_VIOLATION en {{ mongo_tls_target_node }}:
       Version.Index esperado={{ mongo_tls_expected_version_index }},

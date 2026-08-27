@@ -124,11 +124,12 @@
           - --nodb
           - --eval
           - |
-            const user = process.env.MONGO_ADMIN_USER;
-            const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
-            const db = connect(uri);
-            db.auth(user, pass);
+            try {
+              const user = process.env.MONGO_ADMIN_USER;
+              const pass = process.env.MONGO_ADMIN_PASSWORD;
+              const uri = `mongodb://mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+              const db = connect(uri);
+              db.auth(user, pass);
               const p = db.hello().primary;
               print("FAILOVER_PRIMARY=" + (p || "none"));
             } catch(e) {
@@ -232,11 +233,12 @@
           - --nodb
           - --eval
           - |
-            const user = process.env.MONGO_ADMIN_USER;
-            const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
-            const db = connect(uri);
-            db.auth(user, pass);
+            try {
+              const user = process.env.MONGO_ADMIN_USER;
+              const pass = process.env.MONGO_ADMIN_PASSWORD;
+              const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+              const db = connect(uri);
+              db.auth(user, pass);
               const rs = db.adminCommand({replSetGetStatus: 1});
               const m1 = rs.members.find(m => m.name === 'mongo1:27017');
               print("M1_HEALTH=" + (m1 ? m1.health : 0));
@@ -275,11 +277,12 @@
           - --nodb
           - --eval
           - |
-            const user = process.env.MONGO_ADMIN_USER;
-            const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo1:27017/admin?directConnection=true&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
-            const db = connect(uri);
-            db.auth(user, pass);
+            try {
+              const user = process.env.MONGO_ADMIN_USER;
+              const pass = process.env.MONGO_ADMIN_PASSWORD;
+              const uri = `mongodb://mongo1:27017/admin?directConnection=true&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+              const db = connect(uri);
+              db.auth(user, pass);
               db.getMongo().setReadPref('secondaryPreferred');
               const count = db.getSiblingDB('{{ test_database }}').{{ test_collection }}.countDocuments({
                 prueba: 'escritura_durante_failover',
@@ -332,11 +335,12 @@
           - --nodb
           - --eval
           - |
-            const user = process.env.MONGO_ADMIN_USER;
-            const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
-            const db = connect(uri);
-            db.auth(user, pass);
+            try {
+              const user = process.env.MONGO_ADMIN_USER;
+              const pass = process.env.MONGO_ADMIN_PASSWORD;
+              const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+              const db = connect(uri);
+              db.auth(user, pass);
               print("FINAL_PRIMARY=" + db.hello().primary);
             } catch(e) {
               print("FINAL_PRIMARY=none");

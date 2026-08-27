@@ -9,10 +9,12 @@ environment_name: "local"
 # TLS LOCAL - ESTADO INICIAL Y RUTAS PKI
 # ============================================================
 
+# Estado seguro inicial para aprovisionamiento desde cero.
+# TLS se activa posteriormente mediante los playbooks de rollout.
 mongo_tls_enabled: true
 mongo_tls_clients_enabled: true
 mongo_tls_target_mode: "requireTLS"
-mongo_tls_deployment_mode: "preferTLS"
+mongo_tls_deployment_mode: "requireTLS"
 
 mongo_tls_provisioning_source: "ansible_local_ca"
 mongo_tls_secret_version: "v1"

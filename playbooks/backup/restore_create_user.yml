@@ -55,25 +55,28 @@
             const adminPass = process.env.MONGO_ADMIN_PASSWORD;
             const restoreUser = process.env.MONGO_RESTORE_USER;
             const restorePass = process.env.MONGO_RESTORE_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/{{ mongo_restore_auth_database | default('admin') }}?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             const db = connect(uri);
             db.auth(adminUser, adminPass);
-            const adminDB = db.getSiblingDB("admin");
-            const existing = adminDB.getUser(restoreUser);
+            const authDB = process.env.MONGO_RESTORE_AUTH_DB || "{{ mongo_restore_auth_database | default('admin') }}";
+            const targetAuthDB = db.getSiblingDB(authDB);
+            const existing = targetAuthDB.getUser(restoreUser);
             if (!existing) {
-              adminDB.createUser({
+              targetAuthDB.createUser({
                 user: restoreUser,
                 pwd: restorePass,
                 roles: [
-                  { role: "restore", db: "admin" }
+                  { role: "restore", db: "admin" },
+                  { role: "readWrite", db: "{{ mongo_database }}" }
                 ]
               });
               print("USER_STATUS=CREATED");
             } else {
-              adminDB.updateUser(restoreUser, {
+              targetAuthDB.updateUser(restoreUser, {
                 pwd: restorePass,
                 roles: [
-                  { role: "restore", db: "admin" }
+                  { role: "restore", db: "admin" },
+                  { role: "readWrite", db: "{{ mongo_database }}" }
                 ]
               });
               print("USER_STATUS=UPDATED");
@@ -115,7 +118,7 @@
           - |
             const user = process.env.MONGO_RESTORE_USER;
             const pass = process.env.MONGO_RESTORE_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/{{ mongo_restore_auth_database | default('admin') }}?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             try {
               const db = connect(uri);
               db.auth(user, pass);

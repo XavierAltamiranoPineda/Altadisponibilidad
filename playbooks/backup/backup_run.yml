@@ -226,6 +226,61 @@
             success_msg: "[OK] PRIMARY activo identificado: {{ mongo_primary }}"
 
         # ============================================================
+        # PREFLIGHT DE AUTENTICACION ANTES DE MONGODUMP
+        # ============================================================
+
+        - name: Preflight — Validar autenticacion y acceso del usuario de backup via TLS
+          ansible.builtin.command:
+            argv:
+              - docker
+              - run
+              - --rm
+              - --network
+              - "{{ mongo_backup_network }}"
+              - -v
+              - "{{ mongo_tls_ca_cert_path }}:{{ mongo_tls_client_ca_file }}:ro"
+              - --env
+              - MONGO_BACKUP_USER
+              - --env
+              - MONGO_BACKUP_PASSWORD
+              - "{{ mongo_image }}"
+              - mongosh
+              - --quiet
+              - --nodb
+              - --eval
+              - |
+                try {
+                  const user = process.env.MONGO_BACKUP_USER;
+                  const pass = process.env.MONGO_BACKUP_PASSWORD;
+                  const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/{{ mongo_backup_auth_database | default('admin') }}?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+                  const db = connect(uri);
+                  db.auth(user, pass);
+                  const targetDB = db.getSiblingDB("{{ mongo_database }}");
+                  const ping = targetDB.runCommand({ ping: 1 });
+                  if (ping.ok !== 1) quit(1);
+                  print("PREFLIGHT_BACKUP_AUTH_OK");
+                } catch(e) {
+                  print("PREFLIGHT_BACKUP_AUTH_FAILED: " + e.message);
+                  quit(1);
+                }
+          environment:
+            MONGO_BACKUP_USER: "{{ mongo_backup_user }}"
+            MONGO_BACKUP_PASSWORD: "{{ mongo_backup_password }}"
+          register: mongo_backup_preflight_raw
+          changed_when: false
+          failed_when: false
+          no_log: true
+
+        - name: Validar resultado preflight de autenticacion de backup
+          ansible.builtin.assert:
+            that:
+              - mongo_backup_preflight_raw.rc == 0
+              - "'PREFLIGHT_BACKUP_AUTH_OK' in mongo_backup_preflight_raw.stdout"
+            fail_msg: >-
+              [ERROR] BACKUP_AUTHENTICATION_FAILED: El usuario de respaldo ('{{ mongo_backup_user }}') no pudo autenticarse contra la base '{{ mongo_backup_auth_database | default('admin') }}'. Verifique que 'playbooks/backup/backup_create_users.yml' haya sido ejecutado tras reconstruir el cluster.
+            success_msg: "[OK] Preflight de autenticacion de backup validado correctamente via TLS"
+
+        # ============================================================
         # EJECUCION DE MONGODUMP Y MEDICION DE DURACION
         # ============================================================
 
@@ -259,7 +314,7 @@
                     --uri="{{ mongo_backup_uri }}" \
                     --sslCAFile="{{ mongo_tls_client_ca_file }}" \
                     --username="$MONGO_BACKUP_USER" \
-                    --authenticationDatabase=admin \
+                    --authenticationDatabase="{{ mongo_backup_auth_database | default('admin') }}" \
                     --db="{{ mongo_database }}" \
                     --gzip \
                     --archive > "{{ backup_directory }}/{{ backup_filename }}"

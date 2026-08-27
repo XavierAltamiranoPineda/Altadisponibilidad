@@ -105,5 +105,20 @@ class TestRunnerSecurity(unittest.TestCase):
         self.assertIn('--sslCAFile', self.backup_run_text, "backup_run.yml must use --sslCAFile")
         self.assertIn('--sslCAFile', self.restore_tasks_text, "restore_test_tasks.yml must use --sslCAFile")
 
+
+    def test_auth_database_coherence_between_users_and_runners(self):
+        """Ensures mongo_backup_auth_database is used consistently in backup_run.yml"""
+        self.assertIn('mongo_backup_auth_database', self.backup_run_text,
+            "backup_run.yml must reference mongo_backup_auth_database")
+        self.assertIn('mongo_restore_auth_database', self.restore_tasks_text,
+            "restore_test_tasks.yml must reference mongo_restore_auth_database")
+
+    def test_preflight_authentication_check_in_backup_run(self):
+        """Ensures preflight authentication check exists in backup_run.yml"""
+        self.assertIn('Preflight — Validar autenticacion', self.backup_run_text,
+            "backup_run.yml must contain a preflight authentication check task")
+        self.assertIn('BACKUP_AUTHENTICATION_FAILED', self.backup_run_text,
+            "backup_run.yml preflight must fail with BACKUP_AUTHENTICATION_FAILED")
+
 if __name__ == '__main__':
     unittest.main(verbosity=2)

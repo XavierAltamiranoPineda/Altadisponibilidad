@@ -149,7 +149,7 @@
             --uri="{{ mongo_backup_uri }}" \
             --sslCAFile="{{ mongo_tls_client_ca_file }}" \
             --username="$MONGO_RESTORE_USER" \
-            --authenticationDatabase=admin \
+            --authenticationDatabase="{{ mongo_restore_auth_database | default('admin') }}" \
             --gzip \
             --archive \
             --nsFrom="{{ mongo_database }}.*" \

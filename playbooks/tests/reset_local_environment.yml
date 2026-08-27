@@ -4,18 +4,33 @@
   connection: local
   gather_facts: false
 
+  vars_files:
+    - "{{ playbook_dir }}/../../vars/common.yml"
+    - "{{ playbook_dir }}/../../vars/local.yml"
+
   vars:
     mongo_services:
       - mongo1
       - mongo2
       - mongo3
 
-    mongo_volumes:
+    mongo_data_volumes:
       - mongo1_data
       - mongo2_data
       - mongo3_data
 
+    mongo_tls_control_volumes:
+      - mongo1_tls_control
+      - mongo2_tls_control
+      - mongo3_tls_control
+
     mongo_secret: "mongo_keyfile"
+
+    tls_runtime_artifacts:
+      - "{{ playbook_dir }}/../../logs/tls_rollout_state.json"
+      - "{{ playbook_dir }}/../../logs/tls_update_spec_mongo1.json"
+      - "{{ playbook_dir }}/../../logs/tls_update_spec_mongo2.json"
+      - "{{ playbook_dir }}/../../logs/tls_update_spec_mongo3.json"
 
   tasks:
 
@@ -69,12 +84,12 @@
       ansible.builtin.shell:
         cmd: |
           docker ps -aq --filter "volume={{ item }}"
-      loop: "{{ mongo_volumes }}"
+      loop: "{{ mongo_data_volumes + mongo_tls_control_volumes }}"
       register: volume_containers
       changed_when: false
 
     # ============================================================
-    # 4. ELIMINAR SOLO CONTENEDORES ANTIGUOS V2
+    # 4. ELIMINAR CONTENEDORES ANTIGUOS
     # ============================================================
 
     - name: Eliminar contenedores antiguos asociados a volumenes V2
@@ -85,7 +100,7 @@
           if [ -n "$CONTAINERS" ]; then
             docker rm -f $CONTAINERS
           fi
-      loop: "{{ mongo_volumes }}"
+      loop: "{{ mongo_data_volumes + mongo_tls_control_volumes }}"
       register: container_cleanup
       changed_when: container_cleanup.stdout | trim != ""
       failed_when: false
@@ -94,7 +109,7 @@
       ansible.builtin.shell:
         cmd: |
           docker ps -aq --filter "volume={{ item }}"
-      loop: "{{ mongo_volumes }}"
+      loop: "{{ mongo_data_volumes + mongo_tls_control_volumes }}"
       register: volume_usage
       retries: 30
       delay: 2
@@ -106,18 +121,18 @@
         msg: "[OK] Contenedores/tareas antiguas MongoDB V2 eliminados."
 
     # ============================================================
-    # 5. ELIMINAR VOLUMENES V2
+    # 5. ELIMINAR VOLUMENES DE DATOS Y DE CONTROL TLS
     # ============================================================
 
-    - name: Verificar volumenes MongoDB
+    - name: Verificar volumenes de datos y de control TLS
       ansible.builtin.command:
         cmd: "docker volume inspect {{ item }}"
-      loop: "{{ mongo_volumes }}"
+      loop: "{{ mongo_data_volumes + mongo_tls_control_volumes }}"
       register: volume_checks
       changed_when: false
       failed_when: false
 
-    - name: Eliminar volumenes MongoDB existentes
+    - name: Eliminar volumenes existentes (datos y control TLS)
       ansible.builtin.command:
         cmd: "docker volume rm {{ item.item }}"
       loop: "{{ volume_checks.results }}"
@@ -126,7 +141,7 @@
       changed_when: true
 
     # ============================================================
-    # 6. ELIMINAR SECRET V2
+    # 6. ELIMINAR SECRET MONGO_KEYFILE
     # ============================================================
 
     - name: Verificar secret mongo_keyfile
@@ -143,7 +158,51 @@
       changed_when: true
 
     # ============================================================
-    # 7. VALIDAR LIMPIEZA
+    # 7. LIMPIAR ARTEFACTOS RUNTIME DEL ROLLOUT TLS
+    # ============================================================
+
+    - name: Eliminar state files operacionales del rollout TLS si existen
+      ansible.builtin.file:
+        path: "{{ item }}"
+        state: absent
+      loop: "{{ tls_runtime_artifacts }}"
+
+    # ============================================================
+    # 8. SINCRONIZAR VARS/LOCAL.YML AL ESTADO BOOTSTRAP
+    # ============================================================
+
+    - name: Restaurar mongo_tls_enabled=false en vars/local.yml
+      ansible.builtin.lineinfile:
+        path: "{{ playbook_dir }}/../../vars/local.yml"
+        regexp: '^mongo_tls_enabled:'
+        line: 'mongo_tls_enabled: false'
+
+    - name: Restaurar mongo_tls_clients_enabled=false en vars/local.yml
+      ansible.builtin.lineinfile:
+        path: "{{ playbook_dir }}/../../vars/local.yml"
+        regexp: '^mongo_tls_clients_enabled:'
+        line: 'mongo_tls_clients_enabled: false'
+
+    - name: Restaurar mongo_tls_target_mode=requireTLS en vars/local.yml
+      ansible.builtin.lineinfile:
+        path: "{{ playbook_dir }}/../../vars/local.yml"
+        regexp: '^mongo_tls_target_mode:'
+        line: 'mongo_tls_target_mode: "requireTLS"'
+
+    - name: Restaurar mongo_tls_deployment_mode=disabled en vars/local.yml
+      ansible.builtin.lineinfile:
+        path: "{{ playbook_dir }}/../../vars/local.yml"
+        regexp: '^mongo_tls_deployment_mode:'
+        line: 'mongo_tls_deployment_mode: "disabled"'
+
+    - name: Restaurar mongo_backup_uri con tls=true en vars/local.yml
+      ansible.builtin.lineinfile:
+        path: "{{ playbook_dir }}/../../vars/local.yml"
+        regexp: '^mongo_backup_uri:'
+        line: 'mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0&tls=true"'
+
+    # ============================================================
+    # 9. VALIDAR LIMPIEZA TOTAL
     # ============================================================
 
     - name: Validar servicios eliminados
@@ -154,15 +213,23 @@
       register: final_services
       changed_when: false
 
-    - name: Validar volumenes eliminados
+    - name: Validar volumenes de datos eliminados
       ansible.builtin.shell:
         cmd: |
           docker volume ls --format '{{ "{{.Name}}" }}' \
           | grep -E '^(mongo1_data|mongo2_data|mongo3_data)$' || true
-      register: final_volumes
+      register: final_data_volumes
       changed_when: false
 
-    - name: Validar secret eliminado
+    - name: Validar volumenes de control TLS eliminados
+      ansible.builtin.shell:
+        cmd: |
+          docker volume ls --format '{{ "{{.Name}}" }}' \
+          | grep -E '^(mongo1_tls_control|mongo2_tls_control|mongo3_tls_control)$' || true
+      register: final_tls_volumes
+      changed_when: false
+
+    - name: Validar secret mongo_keyfile eliminado
       ansible.builtin.shell:
         cmd: |
           docker secret ls --format '{{ "{{.Name}}" }}' \
@@ -170,17 +237,31 @@
       register: final_secret
       changed_when: false
 
+    - name: Validar contenido final de vars/local.yml
+      ansible.builtin.slurp:
+        src: "{{ playbook_dir }}/../../vars/local.yml"
+      register: local_yml_content
+
+    - name: Interpretar variables de vars/local.yml
+      ansible.builtin.set_fact:
+        local_vars: "{{ (local_yml_content.content | b64decode) | from_yaml }}"
+
     - name: Validar resultado del reset
       ansible.builtin.assert:
         that:
           - final_services.stdout | trim == ""
-          - final_volumes.stdout | trim == ""
+          - final_data_volumes.stdout | trim == ""
+          - final_tls_volumes.stdout | trim == ""
           - final_secret.stdout | trim == ""
-        fail_msg: "ERROR: Quedaron recursos MongoDB V2 sin eliminar."
-        success_msg: "OK: Entorno MongoDB V2 eliminado completamente."
+          - not (local_vars.mongo_tls_enabled | bool)
+          - not (local_vars.mongo_tls_clients_enabled | bool)
+          - local_vars.mongo_tls_target_mode == 'requireTLS'
+          - local_vars.mongo_tls_deployment_mode == 'disabled'
+        fail_msg: "ERROR: El reset del entorno no cumplio con todos los criterios de limpieza y estado bootstrap."
+        success_msg: "OK: Entorno MongoDB V2 y estado local restaurados al estado bootstrap limpio."
 
     # ============================================================
-    # 8. RESULTADO FINAL
+    # 10. RESULTADO FINAL
     # ============================================================
 
     - name: Resultado final
@@ -189,14 +270,13 @@
           - "============================================================"
           - "RESET LOCAL MONGODB V2 COMPLETADO"
           - "============================================================"
-          - "[OK] mongo1 eliminado"
-          - "[OK] mongo2 eliminado"
-          - "[OK] mongo3 eliminado"
-          - "[OK] mongo1_data eliminado"
-          - "[OK] mongo2_data eliminado"
-          - "[OK] mongo3_data eliminado"
+          - "[OK] mongo1, mongo2, mongo3 eliminados"
+          - "[OK] mongo1_data, mongo2_data, mongo3_data eliminados"
+          - "[OK] mongo1_tls_control, mongo2_tls_control, mongo3_tls_control eliminados"
           - "[OK] mongo_keyfile eliminado"
+          - "[OK] Artefactos de estado TLS en logs/ eliminados"
+          - "[OK] vars/local.yml -> deployment_mode: disabled, tls_enabled: false"
+          - "[OK] Docker Secrets TLS (PKI v1) CONSERVADOS"
           - "[OK] mongo_swarm_net CONSERVADA"
           - "[OK] Docker Swarm CONSERVADO"
-          - "[OK] Recursos V1 NO modificados"
           - "============================================================"

@@ -130,3 +130,9 @@ backup_encryption_required: true
 backup_encryption_provider: "institutional"
 backup_encryption_at_rest_managed_externally: true
 backup_transfer_encryption_managed_externally: true
+
+# ============================================================
+# FUENTE DE VERDAD DE AUTENTICACION DE BACKUP Y RESTORE
+# ============================================================
+mongo_backup_auth_database: "admin"
+mongo_restore_auth_database: "admin"
