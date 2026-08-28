@@ -1,3 +1,123 @@
+============================================================
+
+0. PREPARAR REPOSITORIO LOCAL DESPUÉS DE CLONAR
+
+============================================================
+
+0.1. Clonar el repositorio
+
+git clone https://github.com/XavierAltamiranoPineda/Altadisponibilidad.git
+cd Altadisponibilidad
+
+0.2. Instalar dependencias base
+
+En Ubuntu/WSL:
+
+sudo apt update
+sudo apt install -y ansible git openssl curl jq coreutils util-linux
+
+Verificar:
+
+ansible --version
+git --version
+openssl version
+docker --version
+docker compose version
+
+Docker Desktop debe estar instalado y la integración con WSL habilitada antes de continuar.
+
+0.3. Dar permisos de ejecución a los scripts
+
+chmod -R u+rwX .
+find scripts -type f -name '*.sh' -exec chmod u+x {} +
+
+Verificar:
+
+find scripts -type f -name '*.sh' -exec ls -l {} +
+
+0.4. Crear la carpeta secrets/ antes de ejecutar Ansible
+
+La carpeta secrets/ no debe depender de Git para existir. Los playbooks generan dentro de ella el keyfile, la PKI TLS y otros secretos, por lo que debe crearse manualmente después de clonar el repositorio:
+
+mkdir -p secrets
+chmod 700 secrets
+
+La estructura terminará siendo similar a:
+
+secrets/
+├── backup-encryption
+│   └── local
+│       ├── backup_age.key
+│       └── backup_age.pub
+├── mongo-keyfile
+├── mongodb-tls
+│   └── local
+│       ├── ca
+│       │   ├── mongo_local_root_ca.csr
+│       │   └── mongo_local_root_ca.key
+│       └── v1
+│           ├── mongo1
+│           │   ├── mongo1.crt
+│           │   ├── mongo1.csr
+│           │   ├── mongo1.key
+│           │   └── mongo1.pem
+│           ├── mongo2
+│           │   ├── mongo2.crt
+│           │   ├── mongo2.csr
+│           │   ├── mongo2.key
+│           │   └── mongo2.pem
+│           ├── mongo3
+│           │   ├── mongo3.crt
+│           │   ├── mongo3.csr
+│           │   ├── mongo3.key
+│           │   └── mongo3.pem
+│           └── mongo_ca.pem
+└── vault_password
+
+No crees manualmente mongo-keyfile, certificados, claves privadas o archivos PEM. Esos archivos los generan los playbooks. Solo crea la carpeta secrets/ y el archivo vault_password cuando corresponda.
+
+0.5. Crear el archivo de contraseña de Ansible Vault
+
+nano secrets/vault_password
+chmod 600 secrets/vault_password
+
+El archivo debe contener únicamente la contraseña utilizada para abrir vars/vault_mongodb.yml. No debe subirse a Git.
+
+0.6. Verificar .gitignore
+
+Asegúrate de que .gitignore contenga, como mínimo:
+
+# Secretos y material criptográfico
+secrets/
+
+# Backups y logs generados
+backups/
+logs/
+
+# Archivos temporales
+*.tmp
+*.log
+
+Verifica que Git no intente rastrear secretos:
+
+git status --ignored
+
+Nunca deben aparecer como archivos versionados:
+
+secrets/mongo-keyfile
+secrets/vault_password
+secrets/mongodb-tls/**
+secrets/backup-encryption/**
+
+Si alguno ya fue agregado al índice de Git por error, retíralo del índice sin borrar el archivo local:
+
+git rm -r --cached secrets
+
+Después confirma:
+
+git status
+
+
 # ============================================================
 # 1. ELIMINAR BACKUPS
 # ============================================================
@@ -119,6 +239,89 @@ ansible-playbook \
   -e target_environment=local
 
 # ============================================================
+# 10.1 CONFIGURACION COMPASS
+# ============================================================
+
+# 1. Verificar que mongo1 publica el puerto
+
+docker service ls
+
+Debe verse:
+
+mongo1   replicated   1/1   mongo:7-jammy   *:27017->27017/tcp
+
+
+# 2. Verificar CA publica
+
+ls -l secrets/mongodb-tls/local/v1/mongo_ca.pem
+
+
+# 3. Copiar CA a Windows
+
+cp secrets/mongodb-tls/local/v1/mongo_ca.pem \
+  /mnt/c/Users/Usuario01/Documents/mongo_ca.pem
+
+
+# 4. Obtener usuario admin
+
+ansible-vault view \
+  vars/vault_mongodb.yml \
+  --vault-password-file secrets/vault_password \
+  | grep '^mongo_admin_user:'
+
+
+# 5. Obtener password admin
+
+ansible-vault view \
+  vars/vault_mongodb.yml \
+  --vault-password-file secrets/vault_password \
+  | grep '^mongo_admin_password:'
+
+
+# 6. Usar URI
+
+mongodb://localhost:27017/?directConnection=true&tls=true&authSource=admin
+
+
+# 7. Configurar Authentication
+
+Username:
+admin
+
+Password:
+<password obtenido del Vault>
+
+Authentication Database:
+admin
+
+
+# 8. Configurar TLS/SSL
+
+TLS/SSL:
+On
+
+Importar el certificado CA en MongoDB Compass:
+Certificate Authority File:
+C:\Users\Usuario01\Documents\mongo_ca.pem
+
+Client Certificate:
+ninguno
+
+Allow invalid certificates:
+OFF
+
+Allow invalid hostnames:
+OFF
+
+
+# 9. Conectar
+
+Presionar:
+
+Connect
+
+
+# ============================================================
 
 # 11. CREAR DATOS DE PRUEBA
 
@@ -129,19 +332,6 @@ ansible-playbook \
   --vault-password-file secrets/vault_password \
   -e target_environment=local
 
-
-🍃 VER AHORA EN MONGODB COMPASS
-
-Haz Refresh.
-
-Ahora sí debe aparecer:
-
-prueba_ha
-└── datos_failover
-
-Dentro debe existir el documento de prueba.
-
-Este momento demuestra que la base fue creada nuevamente después del rebuild.
 
 # ============================================================
 
@@ -154,32 +344,6 @@ ansible-playbook \
   --vault-password-file secrets/vault_password \
   -e target_environment=local
 
-
-
-🖥️ MIRAR DOCKER DESKTOP DURANTE EL TEST
-
-Cuando aparezca:
-
-Detener mongo1 mediante scale=0
-
-mira Docker Desktop.
-
-Debes ver temporalmente algo equivalente a:
-
-mongo1   0/0
-mongo2   1/1
-mongo3   1/1
-
-Luego uno de los secundarios asume como PRIMARY.
-
-Después, cuando Ansible recupere mongo1, debe volver a:
-
-mongo1   1/1
-🍃 VER AHORA EN COMPASS
-
-La base debe seguir accesible durante la prueba cuando exista un PRIMARY disponible.
-
-Después del failback, los datos escritos durante la caída deben seguir presentes.
 
 # ============================================================
 
@@ -202,13 +366,7 @@ ansible-playbook \
   -e target_environment=local
 
 
-🍃 VER AHORA EN COMPASS
-
-No debería cambiar nada visualmente.
-
-La base sigue funcionando normalmente mientras se genera el respaldo.
-
-📁 VER AHORA EN BACKUPS
+VER AHORA EN BACKUPS
 find backups/mongodb/prueba_ha -type f | sort
 
 Debes ver:
@@ -228,15 +386,6 @@ ansible-playbook \
   -e target_environment=local
 
 
-🍃 VER AHORA EN COMPASS
-
-Después del restore debes ver:
-
-prueba_ha
-prueba_ha_restore_test
-
-La original debe seguir existiendo.
-
 # ============================================================
 
 # 15. DISASTER RECOVERY VISUAL
@@ -251,29 +400,8 @@ ansible-playbook \
   -e target_environment=local
 
 
-🍃 MIRAR COMPASS DURANTE LA PAUSA
+MIRAR COMPASS DURANTE LA PAUSA
 
-Cuando el playbook elimine prueba_ha y haga la pausa:
-
-haz Refresh.
-
-Debe desaparecer:
-
-prueba_ha ❌
-
-Ese es el desastre simulado.
-
-🍃 MIRAR COMPASS AL TERMINAR
-
-Haz otro Refresh.
-
-Debe reaparecer:
-
-prueba_ha ✅
-
-con sus colecciones y documentos.
-
-Este es probablemente el mejor momento visual de toda la demostración.
 
 # ============================================================
 
@@ -286,14 +414,6 @@ ansible-playbook \
   --vault-password-file secrets/vault_password \
   -e target_environment=local
 
-
-📁 VER AHORA EN BACKUPS
-
-Debe aparecer un backup adicional.
-
-🍃 EN COMPASS
-
-La base debe seguir funcionando normalmente.
 
 # ============================================================
 
@@ -315,10 +435,3 @@ ansible-playbook \
   playbooks/validation/validate_mongodb_tls.yml \
   --vault-password-file secrets/vault_password \
   -e target_environment=local
-🖥️ ULTIMA VISTA EN DOCKER DESKTOP
-
-Debe terminar exactamente:
-
-mongo1   1/1
-mongo2   1/1
-mongo3   1/1
