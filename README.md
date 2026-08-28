@@ -10,7 +10,7 @@ Este README describe la arquitectura, los componentes, los mecanismos de segurid
 
 ---
 
-## 1. Objetivo del proyecto
+## Objetivo del proyecto
 
 El objetivo principal es disponer de una solución automatizada para MongoDB que cubra dos áreas críticas:
 
@@ -41,7 +41,7 @@ La solución se complementa con **Ansible Vault**, **KeyFile**, **PKI**, **TLS**
 
 ---
 
-## 2. Arquitectura general
+## Arquitectura general
 
 La arquitectura está compuesta por tres servicios MongoDB ejecutados sobre Docker Swarm:
 
@@ -94,7 +94,7 @@ Características principales:
 
 ---
 
-## 3. Alta disponibilidad
+## Alta disponibilidad
 
 MongoDB se configura como un Replica Set de tres miembros.
 
@@ -116,7 +116,7 @@ mongo3 = 1
 
 `mongo1` tiene mayor preferencia electoral, mientras que `mongo2` y `mongo3` pueden participar en elecciones y asumir el rol PRIMARY cuando sea necesario.
 
-### 3.1 Replica Set
+### Replica Set
 
 Replica Set:
 
@@ -134,7 +134,7 @@ mongo3:27017
 
 MongoDB replica automáticamente las operaciones realizadas en el PRIMARY hacia los SECONDARY.
 
-### 3.2 Failover
+### Failover
 
 El proyecto incluye una prueba automatizada que:
 
@@ -148,7 +148,7 @@ El proyecto incluye una prueba automatizada que:
 - espera su reincorporación;
 - valida nuevamente la salud del Replica Set.
 
-### 3.3 Failback y prioridades
+### Failback y prioridades
 
 Después de recuperar un nodo, MongoDB lo reincorpora al Replica Set.
 
@@ -156,7 +156,7 @@ Las prioridades permiten definir preferencia electoral sin forzar permanentement
 
 ---
 
-## 4. Docker Swarm
+## Docker Swarm
 
 Docker Swarm administra los servicios:
 
@@ -176,7 +176,7 @@ Cada servicio utiliza:
 - autenticación;
 - TLS.
 
-### 4.1 Persistencia
+### Persistencia
 
 Conceptualmente:
 
@@ -188,7 +188,7 @@ mongo3 -> mongo3_data
 
 Los datos no dependen del ciclo de vida de un contenedor individual.
 
-### 4.2 Red
+### Red
 
 Los nodos se comunican sobre:
 
@@ -206,7 +206,7 @@ mongo3
 
 ---
 
-## 5. Automatización con Ansible
+## Automatización con Ansible
 
 Ansible es el componente central del proyecto.
 
@@ -284,7 +284,7 @@ Incluye pruebas de:
 
 ---
 
-## 6. Seguridad
+## Seguridad
 
 La solución implementa varias capas:
 
@@ -317,7 +317,7 @@ Docker Secrets
 
 ---
 
-## 7. Ansible Vault
+## Ansible Vault
 
 Las credenciales se almacenan cifradas en:
 
@@ -348,7 +348,7 @@ Este archivo no debe versionarse.
 
 ---
 
-## 8. KeyFile
+## KeyFile
 
 El Replica Set utiliza KeyFile para autenticación interna entre nodos.
 
@@ -371,7 +371,7 @@ Esto permite que los miembros se reconozcan como nodos autorizados del clúster.
 
 ---
 
-## 9. PKI
+## PKI
 
 El proyecto genera una PKI local para TLS.
 
@@ -412,7 +412,7 @@ Los secretos criptográficos deben mantenerse fuera del repositorio.
 
 ---
 
-## 10. TLS
+## TLS
 
 El estado final esperado es:
 
@@ -453,7 +453,7 @@ TLS protege y valida el canal. MongoDB valida identidad y permisos.
 
 ---
 
-## 11. MongoDB Compass
+## MongoDB Compass
 
 Compass se utiliza para ver visualmente el estado y los datos durante las pruebas.
 
@@ -502,7 +502,7 @@ La configuración exacta está documentada en:
 
 ---
 
-## 12. Backups
+## Backups
 
 El flujo de respaldo es:
 
@@ -536,7 +536,7 @@ Bitácora
 
 ---
 
-## 13. MongoDB Database Tools
+## MongoDB Database Tools
 
 Se utilizan:
 
@@ -566,7 +566,7 @@ Esto evita depender de versiones arbitrarias instaladas globalmente.
 
 ---
 
-## 14. Usuario de backup
+## Usuario de backup
 
 El proyecto utiliza un usuario específico para respaldo.
 
@@ -589,7 +589,7 @@ El objetivo es aplicar mínimo privilegio.
 
 ---
 
-## 15. Generación de backups
+## Generación de backups
 
 Formato:
 
@@ -618,7 +618,7 @@ El formato archive genera un archivo lógico único y gzip reduce su tamaño.
 
 ---
 
-## 16. Integridad SHA-256
+## Integridad SHA-256
 
 Por cada backup:
 
@@ -641,7 +641,7 @@ El checksum permite detectar:
 
 ---
 
-## 17. Bitácoras
+## Bitácoras
 
 La solución registra información de ejecución:
 
@@ -659,7 +659,7 @@ Esto permite auditoría y diagnóstico.
 
 ---
 
-## 18. Cron
+## Cron
 
 Los respaldos pueden ejecutarse automáticamente mediante cron.
 
@@ -673,7 +673,7 @@ Existe una prueba específica para comprobar que el flujo programado funciona re
 
 ---
 
-## 19. Retención
+## Retención
 
 Variables de referencia:
 
@@ -691,7 +691,7 @@ La limpieza está separada de la generación del respaldo.
 
 ---
 
-## 20. Restore
+## Restore
 
 La restauración utiliza:
 
@@ -709,7 +709,7 @@ Antes de restaurar se validan:
 
 ---
 
-## 21. Usuario de restore
+## Usuario de restore
 
 Se utiliza un usuario independiente:
 
@@ -721,7 +721,7 @@ Sus credenciales también se administran con Ansible Vault.
 
 ---
 
-## 22. Restore de prueba
+## Restore de prueba
 
 La base original:
 
@@ -748,7 +748,7 @@ Esto permite comprobar restaurabilidad sin destruir la base original.
 
 ---
 
-## 23. Disaster Recovery
+## Disaster Recovery
 
 El proyecto incluye una prueba controlada:
 
@@ -778,7 +778,7 @@ La prueba demuestra que el backup no solo existe, sino que puede recuperar la ba
 
 ---
 
-## 24. Datos de prueba
+## Datos de prueba
 
 Base:
 
@@ -797,7 +797,7 @@ Se utiliza para comprobar:
 
 ---
 
-## 25. Validación final
+## Validación final
 
 El estado esperado de Docker es:
 
@@ -830,7 +830,7 @@ cron
 
 ---
 
-## 26. Directorio `secrets/`
+## Directorio `secrets/`
 
 Estructura aproximada:
 
@@ -864,7 +864,7 @@ logs/
 
 ---
 
-## 27. Ambientes
+## Ambientes
 
 La solución está parametrizada para:
 
@@ -908,7 +908,7 @@ Deben utilizar los recursos reales definidos por la infraestructura correspondie
 
 ---
 
-## 28. TLS frente a cifrado de backups
+## TLS frente a cifrado de backups
 
 Son controles distintos.
 
@@ -928,7 +928,7 @@ Por tanto, TLS no reemplaza el cifrado del archivo `.archive.gz`.
 
 ---
 
-## 29. Recovery administrativo
+## Recovery administrativo
 
 El proyecto incluye rutinas de recuperación para casos de contingencia administrativa o recuperación de un nodo.
 
@@ -936,7 +936,7 @@ Estas rutinas están separadas del flujo normal y deben utilizarse únicamente c
 
 ---
 
-## 30. Principios de diseño
+## Principios de diseño
 
 ### Automatización
 
@@ -978,7 +978,7 @@ Las operaciones críticas incluyen verificaciones después de ejecutarse.
 
 ---
 
-## 31. Tecnologías
+## Tecnologías
 
 | Tecnología | Función |
 |---|---|
@@ -1001,7 +1001,7 @@ Las operaciones críticas incluyen verificaciones después de ejecutarse.
 
 ---
 
-## 32. Flujo completo
+## Flujo completo
 
 ```text
 Preparar entorno
@@ -1062,7 +1062,7 @@ Failback                 Restore
 
 ---
 
-## 33. Guía de ejecución
+## Guía de ejecución
 
 La secuencia completa de comandos y pruebas está centralizada en:
 
@@ -1102,7 +1102,7 @@ Ese documento contiene:
 
 ---
 
-## 34. Resultado final esperado
+## Resultado final esperado
 
 ### MongoDB
 
@@ -1156,7 +1156,7 @@ disaster recovery: probado
 
 ---
 
-## 35. Alcance
+## Alcance
 
 Este repositorio implementa y demuestra:
 
@@ -1180,7 +1180,7 @@ El entorno LOCAL funciona como laboratorio y demostración. Los ambientes superi
 
 ---
 
-## 36. Documentación del repositorio
+## Documentación del repositorio
 
 ### `README.md`
 
@@ -1209,15 +1209,9 @@ La separación es intencional para evitar duplicar procedimientos.
 
 ---
 
-## 37. Repositorio
 
-**Proyecto:** Alta Disponibilidad y Backups MongoDB
 
-**Repositorio:** `XavierAltamiranoPineda/Altadisponibilidad`
-
----
-
-## 38. Resumen
+## Resumen
 
 La solución integra en un único proyecto automatizado:
 
