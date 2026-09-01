@@ -213,9 +213,18 @@
         echo "GATE_RELEASED op_id=$OP_ID op_mode=$OP_MODE"
       fi
 
+      # ── DETERMINAR PUERTO POR NODO ────────────────────────────────────────────────
+      case "$EXPECTED_NODE" in
+        mongo1) NODE_PORT=27017 ;;
+        mongo2) NODE_PORT=27018 ;;
+        mongo3) NODE_PORT=27019 ;;
+        *) NODE_PORT=27017 ;;
+      esac
+
       # ── EJECUTAR MONGOD ───────────────────────────────────────────────────────────
       if [ "$TLS_MODE" = "requireTLS" ] || [ "$TLS_MODE" = "preferTLS" ] || [ "$TLS_MODE" = "allowTLS" ]; then
         exec "$RUNTIME_ENTRYPOINT" mongod \
+          --port "$NODE_PORT" \
           --replSet {{ mongo_replica_set }} \
           --auth \
           --clusterAuthMode keyFile \
@@ -228,6 +237,7 @@
           --setParameter tlsWithholdClientCertificate=true
       else
         exec "$RUNTIME_ENTRYPOINT" mongod \
+          --port "$NODE_PORT" \
           --replSet {{ mongo_replica_set }} \
           --auth \
           --clusterAuthMode keyFile \

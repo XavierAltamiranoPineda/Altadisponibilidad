@@ -36,10 +36,10 @@
 - name: Validar miembros y prioridades finales
   ansible.builtin.assert:
     that:
-      - mongo_tls_cluster_status.config.members | map(attribute='host') | list | sort == ['mongo1:27017', 'mongo2:27017', 'mongo3:27017'] | sort
+      - mongo_tls_cluster_status.config.members | map(attribute='host') | list | sort == ['mongo1:27017', 'mongo2:27018', 'mongo3:27019'] | sort
       - (mongo_tls_cluster_status.config.members | selectattr('host', 'equalto', 'mongo1:27017') | first).priority in [1, 2]
-      - (mongo_tls_cluster_status.config.members | selectattr('host', 'equalto', 'mongo2:27017') | first).priority in [1, 2]
-      - (mongo_tls_cluster_status.config.members | selectattr('host', 'equalto', 'mongo3:27017') | first).priority in [1, 2]
+      - (mongo_tls_cluster_status.config.members | selectattr('host', 'equalto', 'mongo2:27018') | first).priority in [1, 2]
+      - (mongo_tls_cluster_status.config.members | selectattr('host', 'equalto', 'mongo3:27019') | first).priority in [1, 2]
     fail_msg: "Miembros o prioridades del Replica Set cambiaron."
 
 - name: Validar identidad por nodo con directConnection

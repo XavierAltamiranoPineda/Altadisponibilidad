@@ -55,7 +55,7 @@
             const adminPass = process.env.MONGO_ADMIN_PASSWORD;
             const restoreUser = process.env.MONGO_RESTORE_USER;
             const restorePass = process.env.MONGO_RESTORE_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/{{ mongo_restore_auth_database | default('admin') }}?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/{{ mongo_restore_auth_database | default('admin') }}?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             const db = connect(uri);
             db.auth(adminUser, adminPass);
             const authDB = process.env.MONGO_RESTORE_AUTH_DB || "{{ mongo_restore_auth_database | default('admin') }}";
@@ -118,7 +118,7 @@
           - |
             const user = process.env.MONGO_RESTORE_USER;
             const pass = process.env.MONGO_RESTORE_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/{{ mongo_restore_auth_database | default('admin') }}?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/{{ mongo_restore_auth_database | default('admin') }}?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             try {
               const db = connect(uri);
               db.auth(user, pass);

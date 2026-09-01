@@ -239,51 +239,63 @@ ansible-playbook \
   -e target_environment=local
 
 # ============================================================
-# 10.1 CONFIGURACION COMPASS
+# 10.1 CONFIGURACION COMPASS (ALTA DISPONIBILIDAD Y FAILOVER)
 # ============================================================
 
-# 1. Verificar que mongo1 publica el puerto
+# 1. Configurar archivo hosts en Windows (Requisito indispensable para Replica Set)
+
+Abrir el Bloc de Notas (Notepad) o PowerShell en Windows como Administrador y editar:
+C:\Windows\System32\drivers\etc\hosts
+
+Agregar al final del archivo:
+127.0.0.1  mongo1
+127.0.0.1  mongo2
+127.0.0.1  mongo3
+
+Guardar los cambios. Esto permite que Windows y MongoDB Compass resuelvan los nombres de los 3 nodos hacia los puertos publicados en localhost.
+
+
+# 2. Verificar que los 3 nodos publican sus puertos en Docker
 
 docker service ls
 
-Debe verse:
+Debe verse cada nodo con su puerto correspondiente:
+mongo1 -> *:27017->27017/tcp
+mongo2 -> *:27018->27018/tcp
+mongo3 -> *:27019->27019/tcp
 
-mongo1   replicated   1/1   mongo:7-jammy   *:27017->27017/tcp
 
-
-# 2. Verificar CA publica
+# 3. Verificar CA publica
 
 ls -l secrets/mongodb-tls/local/v1/mongo_ca.pem
 
 
-# 3. Copiar CA a Windows
+# 4. Copiar CA a Windows
 
 cp secrets/mongodb-tls/local/v1/mongo_ca.pem \
   /mnt/c/Users/Usuario01/Documents/mongo_ca.pem
 
 
-# 4. Obtener usuario admin
+# 5. Obtener credenciales de Vault
 
 ansible-vault view \
   vars/vault_mongodb.yml \
   --vault-password-file secrets/vault_password \
-  | grep '^mongo_admin_user:'
+  | grep -E '^(mongo_admin_user|mongo_admin_password):'
 
 
-# 5. Obtener password admin
+# 6. URI de Conexion en MongoDB Compass
 
-ansible-vault view \
-  vars/vault_mongodb.yml \
-  --vault-password-file secrets/vault_password \
-  | grep '^mongo_admin_password:'
+Utilizar la URI de Replica Set (con soporte de Failover automatico):
 
+mongodb://mongo1:27017,mongo2:27018,mongo3:27019/?replicaSet=rs0&tls=true&authSource=admin
 
-# 6. Usar URI
+O la URI completa con credenciales y CA embebidas:
 
-mongodb://localhost:27017/?directConnection=true&tls=true&authSource=admin
+mongodb://admin:<password>@mongo1:27017,mongo2:27018,mongo3:27019/?replicaSet=rs0&tls=true&authSource=admin&tlsCAFile=C%3A%5CUsers%5CUsuario01%5CDocuments%5Cmongo_ca.pem
 
 
-# 7. Configurar Authentication
+# 7. Configurar Authentication (si no se incluye en la URI)
 
 Username:
 admin
@@ -295,7 +307,7 @@ Authentication Database:
 admin
 
 
-# 8. Configurar TLS/SSL
+# 8. Configurar TLS/SSL (si se configura manualmente)
 
 TLS/SSL:
 On
@@ -319,6 +331,9 @@ OFF
 Presionar:
 
 Connect
+
+Al conectarse, Compass mostrara el Replica Set rs0 con mongo1 como PRIMARY.
+Si mongo1 es detenido (docker service scale mongo1=0), Compass detectara el cambio automaticamente y mantendra la conexion viva en mongo2:27018 sin desconectarte.
 
 
 # ============================================================

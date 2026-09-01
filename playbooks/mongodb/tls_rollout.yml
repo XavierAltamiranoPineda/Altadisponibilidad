@@ -112,7 +112,7 @@
                         | regex_replace('(?m)^mongo_tls_clients_enabled:.*$', 'mongo_tls_clients_enabled: true')
                         | regex_replace('(?m)^mongo_tls_target_mode:.*$', 'mongo_tls_target_mode: "requireTLS"')
                         | regex_replace('(?m)^mongo_tls_deployment_mode:.*$', 'mongo_tls_deployment_mode: "requireTLS"')
-                        | regex_replace('(?m)^mongo_backup_uri:.*$', 'mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0&tls=true"')
+                        | regex_replace('(?m)^mongo_backup_uri:.*$', 'mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27018,mongo3:27019/?replicaSet=rs0&tls=true"')
                       }}
 
                 - name: Marcar estado SUCCESS en recovery requireTLS

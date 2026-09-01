@@ -25,7 +25,7 @@
       - |
         const user = process.env.MONGO_ADMIN_USER;
         const pass = process.env.MONGO_ADMIN_PASSWORD;
-        const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+        const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
         const db = connect(uri);
         db.auth(user, pass);
         print("PRIMARY=" + db.hello().primary);
@@ -90,7 +90,7 @@
       - |
         const user = process.env.MONGO_ADMIN_USER;
         const pass = process.env.MONGO_ADMIN_PASSWORD;
-        const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+        const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
         const db = connect(uri);
         db.auth(user, pass);
         db.getSiblingDB("{{ restore_test_database }}").dropDatabase();
@@ -198,7 +198,7 @@
       - |
         const user = process.env.MONGO_ADMIN_USER;
         const pass = process.env.MONGO_ADMIN_PASSWORD;
-        const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+        const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
         const db = connect(uri);
         db.auth(user, pass);
         const targetDB = db.getSiblingDB("{{ mongo_database }}");
@@ -240,7 +240,7 @@
       - |
         const user = process.env.MONGO_ADMIN_USER;
         const pass = process.env.MONGO_ADMIN_PASSWORD;
-        const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+        const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
         const db = connect(uri);
         db.auth(user, pass);
         const targetDB = db.getSiblingDB("{{ restore_test_database }}");

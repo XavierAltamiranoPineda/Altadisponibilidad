@@ -37,7 +37,7 @@ mongo_database: "prueba_ha"
 # URI de conexion para respaldo con alta disponibilidad (Replica Set)
 # Conecta a la red overlay mongo_swarm_net con descubrimiento de rs0
 # Sin credenciales (las credenciales se leen desde vars/vault_mongodb.yml)
-mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0&tls=true"
+mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27018,mongo3:27019/?replicaSet=rs0&tls=true"
 
 # Red overlay de Docker Swarm a la que se conecta el contenedor temporal
 mongo_backup_network: "mongo_swarm_net"

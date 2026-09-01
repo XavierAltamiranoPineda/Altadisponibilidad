@@ -168,7 +168,7 @@
             ['allowTLS', 'preferTLS', 'requireTLS'].includes(sourceMode)
               ? '&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem'
               : '';
-          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&serverSelectionTimeoutMS=5000${tlsPart}`;
+          const uri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&serverSelectionTimeoutMS=5000${tlsPart}`;
           try {
             const db = connect(uri);
             const st = db.adminCommand({replSetGetStatus: 1});

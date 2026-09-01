@@ -16,8 +16,10 @@
 
     mongo_nodes:
       - name: mongo2
+        port: 27018
         volume: mongo2_data
       - name: mongo3
+        port: 27019
         volume: mongo3_data
 
   tasks:
@@ -108,6 +110,7 @@
             ['docker', 'service', 'create',
              '--name', item.name,
              '--network', mongo_network,
+             '--publish', 'published=' ~ item.port ~ ',target=' ~ item.port ~ ',protocol=tcp,mode=host',
              '--secret', 'source=' ~ mongo_secret ~ ',target=mongo_keyfile',
              '--mount', 'type=volume,source=' ~ item.volume ~ ',target=/data/db',
              '--update-order', 'stop-first',
@@ -120,7 +123,7 @@
              if mongo_tls_enabled | bool else [])
             + [mongo_image]
             +
-            (mongo_tls_runtime_argv
+            ((mongo_tls_runtime_argv[:-1] + [item.name])
              if mongo_tls_enabled | bool
              else ['sh', '-c',
                    'cp /run/secrets/mongo_keyfile ' ~ mongo_keyfile ~

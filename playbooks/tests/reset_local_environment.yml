@@ -199,7 +199,7 @@
       ansible.builtin.lineinfile:
         path: "{{ playbook_dir }}/../../vars/local.yml"
         regexp: '^mongo_backup_uri:'
-        line: 'mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27017,mongo3:27017/?replicaSet=rs0&tls=true"'
+        line: 'mongo_backup_uri: "mongodb://mongo1:27017,mongo2:27018,mongo3:27019/?replicaSet=rs0&tls=true"'
 
     # ============================================================
     # 9. VALIDAR LIMPIEZA TOTAL

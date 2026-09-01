@@ -12,8 +12,8 @@
     mongo_replset: "rs0"
 
     mongo_nodes:
-      - "mongo2:27017"
-      - "mongo3:27017"
+      - "mongo2:27018"
+      - "mongo3:27019"
 
   tasks:
 
@@ -185,8 +185,8 @@
           - ""
           - "[OK] Replica Set: {{ mongo_replset }}"
           - "[OK] PRIMARY: mongo1:27017"
-          - "[OK] Nodo secundario: mongo2:27017"
-          - "[OK] Nodo secundario: mongo3:27017"
+          - "[OK] Nodo secundario: mongo2:27018"
+          - "[OK] Nodo secundario: mongo3:27019"
           - "[OK] Total de miembros: {{ member_count.stdout | trim }}"
           - "[OK] Autenticación mediante usuario administrador"
           - "[OK] KeyFile compartido mediante Docker Secret"

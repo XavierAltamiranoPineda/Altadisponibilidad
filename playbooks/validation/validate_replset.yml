@@ -49,7 +49,7 @@
           - |
             const user = process.env.MONGO_ADMIN_USER;
             const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             try {
               const db = connect(uri);
               db.auth(user, pass);
@@ -107,7 +107,7 @@
     - name: Validar presencia de los tres nodos
       ansible.builtin.assert:
         that:
-          - (replset_info.members | map(attribute='name') | list | sort) == ['mongo1:27017', 'mongo2:27017', 'mongo3:27017']
+          - (replset_info.members | map(attribute='name') | list | sort) == ['mongo1:27017', 'mongo2:27018', 'mongo3:27019']
         fail_msg: "ERROR: Los tres nodos no estan presentes en el Replica Set."
         success_msg: "OK: mongo1, mongo2 y mongo3 presentes."
 

@@ -132,7 +132,7 @@
           - |
             const user = process.env.MONGO_ADMIN_USER;
             const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             try {
               const db = connect(uri);
               db.auth(user, pass);
@@ -182,7 +182,7 @@
     - name: Confirmar PRIMARY valido
       ansible.builtin.assert:
         that:
-          - validation_diag.primary in ["mongo1:27017", "mongo2:27017", "mongo3:27017"]
+          - validation_diag.primary in ["mongo1:27017", "mongo2:27018", "mongo3:27019"]
         fail_msg: "ERROR: No se pudo detectar un PRIMARY valido."
         success_msg: "OK: PRIMARY detectado: {{ validation_diag.primary }}."
 

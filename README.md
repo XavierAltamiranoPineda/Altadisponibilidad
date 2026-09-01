@@ -128,8 +128,8 @@ Miembros:
 
 ```text
 mongo1:27017
-mongo2:27017
-mongo3:27017
+mongo2:27018
+mongo3:27019
 ```
 
 MongoDB replica automáticamente las operaciones realizadas en el PRIMARY hacia los SECONDARY.

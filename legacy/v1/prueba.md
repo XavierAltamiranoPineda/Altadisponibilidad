@@ -71,8 +71,8 @@ rs.status()
 Ahora debe aparecer:
 
 mongo1:27017 -> NOT REACHABLE / DOWN
-mongo2:27017 -> PRIMARY
-mongo3:27017 -> ARBITER
+mongo2:27018 -> PRIMARY
+mongo3:27019 -> ARBITER
 
 También ejecutar:
 
@@ -81,7 +81,7 @@ db.hello()
 Debe mostrar:
 
 isWritablePrimary: true
-primary: "mongo2:27017"
+primary: "mongo2:27018"
 
 
 ==================================================
@@ -118,7 +118,7 @@ db.hello()
 Debe indicar:
 
 isWritablePrimary: true
-primary: "mongo2:27017"
+primary: "mongo2:27018"
 
 Y:
 

@@ -28,12 +28,12 @@
           const user = process.env.MONGO_ADMIN_USER;
           const pass = process.env.MONGO_ADMIN_PASSWORD;
           const replSet = process.env.MONGO_REPLSET;
-          const expected = ['mongo1:27017', 'mongo2:27017', 'mongo3:27017'];
+          const expected = ['mongo1:27017', 'mongo2:27018', 'mongo3:27019'];
           const requiredNode = '{{ mongo_tls_cluster_expected_node | default('') }}';
           const requiredState = '{{ mongo_tls_cluster_expected_state | default('') }}';
           const expectedMode = '{{ mongo_tls_expected_mode | default(mongo_tls_deployment_mode | default("disabled")) }}';
 
-          const baseUri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet=${replSet}&serverSelectionTimeoutMS=5000`;
+          const baseUri = `mongodb://${encodeURIComponent(user)}:${encodeURIComponent(pass)}@mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet=${replSet}&serverSelectionTimeoutMS=5000`;
           const tlsSuffix = '&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem';
 
           const primaryUri = ['allowTLS', 'preferTLS', 'requireTLS'].includes(expectedMode)

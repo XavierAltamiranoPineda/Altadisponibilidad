@@ -51,7 +51,7 @@
           - |
             const user = process.env.MONGO_ADMIN_USER;
             const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             const db = connect(uri);
             db.auth(user, pass);
             const targetDB = db.getSiblingDB('{{ test_database }}');
@@ -115,7 +115,7 @@
           - |
             const user = process.env.MONGO_ADMIN_USER;
             const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             const db = connect(uri);
             db.auth(user, pass);
             const doc = db.getSiblingDB('{{ test_database }}').{{ test_collection }}.findOne(

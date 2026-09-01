@@ -164,7 +164,7 @@ for NEXT_STAGE in "${ROUTE[@]}"; do
 done
 
 # Resumen final de validación y estado del cluster
-PRIMARY_NODE=$(docker exec $(docker ps -q --filter name=mongo1) mongosh --quiet --eval "try { connect('mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet=rs0&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem').adminCommand({replSetGetStatus: 1}).members.find(m => m.stateStr === 'PRIMARY').name } catch(e) { 'mongo1' }" 2>/dev/null || echo "mongo1")
+PRIMARY_NODE=$(docker exec $(docker ps -q --filter name=mongo1) mongosh --quiet --eval "try { connect('mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet=rs0&tls=true&tlsCAFile=/run/mongo-ca/mongo_ca.pem').adminCommand({replSetGetStatus: 1}).members.find(m => m.stateStr === 'PRIMARY').name } catch(e) { 'mongo1' }" 2>/dev/null || echo "mongo1")
 
 echo "============================================================"
 echo "TLS TARGET ALCANZADO: $DESIRED_TARGET"

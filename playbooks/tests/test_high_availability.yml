@@ -55,7 +55,7 @@
           - |
             const user = process.env.MONGO_ADMIN_USER;
             const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             const db = connect(uri);
             db.auth(user, pass);
             print("PRIMARY=" + db.hello().primary);
@@ -127,7 +127,7 @@
             try {
               const user = process.env.MONGO_ADMIN_USER;
               const pass = process.env.MONGO_ADMIN_PASSWORD;
-              const uri = `mongodb://mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+              const uri = `mongodb://mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
               const db = connect(uri);
               db.auth(user, pass);
               const p = db.hello().primary;
@@ -143,7 +143,7 @@
       delay: 3
       until:
         - failover_primary_raw.rc == 0
-        - "'FAILOVER_PRIMARY=mongo2:27017' in failover_primary_raw.stdout or 'FAILOVER_PRIMARY=mongo3:27017' in failover_primary_raw.stdout"
+        - "'FAILOVER_PRIMARY=mongo2:27018' in failover_primary_raw.stdout or 'FAILOVER_PRIMARY=mongo3:27019' in failover_primary_raw.stdout"
       changed_when: false
       no_log: true
 
@@ -181,7 +181,7 @@
           - |
             const user = process.env.MONGO_ADMIN_USER;
             const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             const db = connect(uri);
             db.auth(user, pass);
             const res = db.getSiblingDB('{{ test_database }}').{{ test_collection }}.insertOne({
@@ -236,7 +236,7 @@
             try {
               const user = process.env.MONGO_ADMIN_USER;
               const pass = process.env.MONGO_ADMIN_PASSWORD;
-              const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+              const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
               const db = connect(uri);
               db.auth(user, pass);
               const rs = db.adminCommand({replSetGetStatus: 1});
@@ -338,7 +338,7 @@
             try {
               const user = process.env.MONGO_ADMIN_USER;
               const pass = process.env.MONGO_ADMIN_PASSWORD;
-              const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+              const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
               const db = connect(uri);
               db.auth(user, pass);
               print("FINAL_PRIMARY=" + db.hello().primary);
@@ -383,7 +383,7 @@
           - |
             const user = process.env.MONGO_ADMIN_USER;
             const pass = process.env.MONGO_ADMIN_PASSWORD;
-            const uri = `mongodb://mongo1:27017,mongo2:27017,mongo3:27017/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
+            const uri = `mongodb://mongo1:27017,mongo2:27018,mongo3:27019/admin?replicaSet={{ mongo_replica_set }}&tls=true&tlsCAFile={{ mongo_tls_client_ca_file }}`;
             const db = connect(uri);
             db.auth(user, pass);
             const rs = db.adminCommand({replSetGetStatus: 1});
@@ -403,8 +403,8 @@
       ansible.builtin.assert:
         that:
           - "'mongo1:27017 | PRIMARY | health=1' in final_status"
-          - "'mongo2:27017 | SECONDARY | health=1' in final_status"
-          - "'mongo3:27017 | SECONDARY | health=1' in final_status"
+          - "'mongo2:27018 | SECONDARY | health=1' in final_status"
+          - "'mongo3:27019 | SECONDARY | health=1' in final_status"
         fail_msg: "ERROR: El Replica Set no termino en el estado esperado."
         success_msg: "OK: Replica Set recuperado completamente."
 
